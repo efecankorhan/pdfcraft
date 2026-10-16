@@ -840,16 +840,21 @@ fn the_eraser_cuts_strokes_and_removes_empty_drawings() {
     let line = |y: f64| (0..=10).map(|k| [100.0 + k as f64 * 20.0, y]).collect::<Vec<_>>();
     let shape = Shape::Ink { strokes: vec![line(500.0), line(400.0)] };
     let i = add_annotation(&mut doc, &new(0, shape), &meta("i")).unwrap();
-    // A vertical swipe through the middle of both lines.
-    assert!(erase_ink(&mut doc, 0, i, &[[200.0, 550.0], [200.0, 350.0]], 5.0, &meta("e")).unwrap());
+    // A vertical swipe through the middle of both lines (segment eraser cuts each line in two).
+    assert!(erase_ink(&mut doc, 0, i, &[[200.0, 550.0], [200.0, 350.0]], 5.0, false, &meta("e")).unwrap());
     let d = &list(&doc, 0)[i];
     let strokes = d.get(b"InkList").unwrap().as_array().unwrap().len();
     assert_eq!(strokes, 4, "each line cut in two");
-    assert!(!erase_ink(&mut doc, 0, i, &[[600.0, 100.0]], 5.0, &meta("e")).unwrap(), "nothing under the eraser");
+    assert!(!erase_ink(&mut doc, 0, i, &[[600.0, 100.0]], 5.0, false, &meta("e")).unwrap(), "nothing under the eraser");
+    // Whole stroke erasing deletes touched strokes entirely.
+    let shape2 = Shape::Ink { strokes: vec![line(300.0)] };
+    let i2 = add_annotation(&mut doc, &new(0, shape2), &meta("i2")).unwrap();
+    assert!(erase_ink(&mut doc, 0, i2, &[[200.0, 310.0], [200.0, 290.0]], 5.0, true, &meta("e")).unwrap());
+    assert!(!list(&doc, 0).iter().any(|d| text(d, b"NM") == "i2"));
     // Rubbing out everything deletes the drawing.
     let all: Vec<[f64; 2]> = (0..=20).map(|k| [100.0 + k as f64 * 10.0, 500.0]).chain((0..=20).map(|k| [100.0 + k as f64 * 10.0, 400.0])).collect();
-    erase_ink(&mut doc, 0, i, &all[..21], 8.0, &meta("e")).unwrap();
-    erase_ink(&mut doc, 0, i, &all[21..], 8.0, &meta("e")).unwrap();
+    erase_ink(&mut doc, 0, i, &all[..21], 8.0, false, &meta("e")).unwrap();
+    erase_ink(&mut doc, 0, i, &all[21..], 8.0, false, &meta("e")).unwrap();
     assert!(!list(&doc, 0).iter().any(|d| d.name(b"Subtype") == Some(b"Ink")));
 }
 

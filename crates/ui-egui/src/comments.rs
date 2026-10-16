@@ -21,7 +21,7 @@ use crate::theme::{self, Tokens};
 use crate::{QuickTool, icons};
 
 /// Acrobat's selection blue for annotation frames and handles (11-visual-spec §5).
-const SELECT_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
+pub(crate) const SELECT_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommentTool {
@@ -252,16 +252,29 @@ pub struct CommentPrefs {
     pub group_tool: [CommentTool; 3],
     /// Hide hover previews on highlight annotations when they contain no comment text beyond the author.
     pub hide_empty_highlight_hover: bool,
+    /// Erase whole continuous strokes rather than cutting holes in lines (tablet note-taking standard).
+    pub stroke_eraser: bool,
+    /// Default font size for Text Box and Callout comments (pt).
+    pub text_box_font_size: f64,
+    /// Saved (color, width) for opaque Pen mode on `CommentTool::Ink`.
+    pub pen_style: (Rgb, f64),
+    /// Saved (color, width) for translucent Freehand Highlighter mode on `CommentTool::Ink`.
+    pub highlighter_style: (Rgb, f64),
 }
 
 impl Default for CommentPrefs {
     fn default() -> Self {
+        let ink_default = Style::default_for(&CommentTool::Ink.sample());
         Self {
             author: login_name(),
             styles: ALL.iter().map(|t| (*t, Style::default_for(&t.sample()))).collect(),
             pinned: false,
             group_tool: [CommentTool::Note, CommentTool::Highlight, CommentTool::Ink],
             hide_empty_highlight_hover: false,
+            stroke_eraser: true,
+            text_box_font_size: 12.0,
+            pen_style: (ink_default.color, ink_default.width),
+            highlighter_style: ([1.0, 0.94, 0.0], 10.0),
         }
     }
 }
@@ -269,6 +282,38 @@ impl Default for CommentPrefs {
 impl CommentPrefs {
     pub fn style(&self, tool: CommentTool) -> Style {
         self.styles.iter().find(|(t, _)| *t == tool).map(|(_, s)| s.clone()).unwrap_or_default()
+    }
+
+    pub fn is_freehand_highlighter(&self) -> bool {
+        self.style(CommentTool::Ink).opacity < 0.85
+    }
+
+    /// Switch `CommentTool::Ink` to opaque Pen mode, restoring the last pen colour and width.
+    pub fn activate_pen(&mut self) {
+        if self.is_freehand_highlighter() {
+            let cur = self.style(CommentTool::Ink);
+            self.highlighter_style = (cur.color, cur.width);
+        }
+        let (color, width) = self.pen_style;
+        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
+            s.color = color;
+            s.width = width.clamp(0.5, 16.0);
+            s.opacity = 1.0;
+        }
+    }
+
+    /// Switch `CommentTool::Ink` to translucent Freehand Highlighter mode, restoring the last highlighter colour and width.
+    pub fn activate_freehand_highlighter(&mut self) {
+        if !self.is_freehand_highlighter() {
+            let cur = self.style(CommentTool::Ink);
+            self.pen_style = (cur.color, cur.width);
+        }
+        let (color, width) = self.highlighter_style;
+        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
+            s.color = color;
+            s.width = width.clamp(0.5, 16.0);
+            s.opacity = 0.4;
+        }
     }
 
     /// Every tool with its current default style (the persisted settings read this).
@@ -279,12 +324,27 @@ impl CommentPrefs {
     pub fn set_color(&mut self, tool: CommentTool, c: Rgb) {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             s.color = c;
+            if tool == CommentTool::Ink {
+                if s.opacity < 0.85 {
+                    self.highlighter_style.0 = c;
+                } else {
+                    self.pen_style.0 = c;
+                }
+            }
         }
     }
 
     pub fn set_width(&mut self, tool: CommentTool, w: f64) {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
-            s.width = w.clamp(0.5, 12.0);
+            let clamped = w.clamp(0.5, 16.0);
+            s.width = clamped;
+            if tool == CommentTool::Ink {
+                if s.opacity < 0.85 {
+                    self.highlighter_style.1 = clamped;
+                } else {
+                    self.pen_style.1 = clamped;
+                }
+            }
         }
     }
 
@@ -292,6 +352,13 @@ impl CommentPrefs {
     pub fn set_opacity(&mut self, tool: CommentTool, o: f64) {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             s.opacity = if o.is_finite() { o.clamp(0.1, 1.0) } else { 1.0 };
+            if tool == CommentTool::Ink {
+                if s.opacity < 0.85 {
+                    self.highlighter_style = (s.color, s.width);
+                } else {
+                    self.pen_style = (s.color, s.width);
+                }
+            }
         }
     }
 
@@ -494,6 +561,10 @@ pub struct CommentView {
     pub search_focus: bool,
     /// Where the canvas context menu was opened: (page, user-space point).
     pub context_at: Option<(usize, [f64; 2])>,
+    /// Radial / arc tool palette for stylus and graphic tablet handwriting:
+    pub radial_menu: Option<crate::radial_menu::RadialMenu>,
+    /// Last (page, screen position) of the eraser while dragging, for real-time stroke removal.
+    pub last_eraser_pos: Option<(usize, Pos2)>,
     /// A one-shot tool just finished; the app returns to the Select tool unless pinned.
     pub tool_done: bool,
 }
@@ -726,8 +797,29 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
     if resp.secondary_clicked()
         && let Some(p) = pointer.filter(|p| page_rect.contains(*p))
     {
+        cv.gesture = None;
+        cv.cancelled_drag = false;
+        if cv.radial_menu.take().is_some() {
+            return true;
+        }
         cv.context_at = Some((cx.page, cx.to_user(p)));
-        cv.selected = cx.hit(p).map(|a| (cx.page, a.index));
+        let is_freehand = matches!(cx.tool, QuickTool::Comment(CommentTool::Ink | CommentTool::Eraser));
+        if !is_freehand {
+            cv.selected = cx.hit(p).map(|a| (cx.page, a.index));
+        }
+        if is_freehand || cv.selected.is_none() {
+            cv.radial_menu = Some(crate::radial_menu::RadialMenu {
+                screen_pos: p,
+                page: cx.page,
+                at: cx.to_user(p),
+                mode: crate::radial_menu::RadialMode::Tools,
+                opened_at: ui.input(|i| i.time),
+            });
+            return true;
+        }
+    }
+    if cv.radial_menu.is_some() {
+        return true;
     }
     match cx.tool {
         // The shape just drawn is selected with its handles showing: they resize it without a
@@ -738,8 +830,51 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 return false;
             }
             if over_page {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                if let Some(p) = pointer {
+                    let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
+                    if tool == CommentTool::Eraser {
+                        cp.circle_filled(p, 7.5, Color32::WHITE);
+                        cp.circle_stroke(p, 7.5, Stroke::new(1.5, Color32::BLACK));
+                        cp.circle_filled(p, 1.0, Color32::from_black_alpha(160));
+                    } else {
+                        let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
+                        let style = cx.prefs.style(tool);
+                        let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
+                        cp.circle_filled(p, dot_r, color32(style.color));
+                        cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                    }
+                }
             }
+            if tool == CommentTool::Eraser {
+                let down = ui.input(|i| i.pointer.primary_down()) || resp.dragged() || resp.clicked();
+                if down && over_page && let Some(p) = pointer {
+                    let u = cx.to_user(p);
+                    let path = match cv.last_eraser_pos {
+                        Some((last_page, last_p)) if last_page == cx.page => vec![cx.to_user(last_p), u],
+                        _ => vec![u],
+                    };
+                    if let Some(edit) = erase(cx, &path) {
+                        match &mut view.pending_edit {
+                            None => view.pending_edit = Some(edit),
+                            Some(Edit::Batch { label, edits }) if label == "Erase" => {
+                                if let Edit::Batch { edits: new_edits, .. } = edit {
+                                    edits.extend(new_edits);
+                                } else {
+                                    edits.push(edit);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    cv.last_eraser_pos = Some((cx.page, p));
+                } else if !down {
+                    cv.last_eraser_pos = None;
+                }
+                return true;
+            }
+
+            let is_down = ui.input(|i| i.pointer.primary_down());
             if resp.drag_started()
                 && pressed_here
                 && let Some(o) = origin
@@ -753,9 +888,9 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             {
                 let p = clamp_to(page_rect, p);
                 let u = cx.to_user(p);
-                if matches!(*tool, CommentTool::Ink | CommentTool::Eraser) {
+                if *tool == CommentTool::Ink {
                     let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(p);
-                    if last.distance(p) >= 1.5 {
+                    if last.distance(p) >= 2.0 {
                         points.push(u);
                     }
                 } else {
@@ -763,18 +898,14 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     points.push(u);
                 }
             }
-            if resp.drag_stopped()
-                && let Some(Gesture::Draw { page, tool, points }) = cv.gesture.clone()
-                && page == cx.page
+            if (resp.drag_stopped() || (!is_down && cv.gesture.is_some()))
+                && matches!(cv.gesture, Some(Gesture::Draw { page, .. }) if page == cx.page)
+                && let Some(Gesture::Draw { page, tool, points }) = cv.gesture.take()
+                && let Some(shape) = drawn_shape(tool, &points)
             {
-                cv.gesture = None;
-                if tool == CommentTool::Eraser {
-                    view.pending_edit = erase(cx, &points);
-                } else if let Some(shape) = drawn_shape(tool, &points) {
-                    let now = ui.input(|i| i.time);
-                    cv.settle(now, page, tool, &points);
-                    view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
-                }
+                let now = ui.input(|i| i.time);
+                cv.settle(now, page, tool, &points);
+                view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
             }
             // A quick press/release does not start an egui drag, but Acrobat's Draw tool treats
             // it as a one-point ink stroke (a dot). The appearance uses round line caps, so a
@@ -797,7 +928,15 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 return false;
             }
             if over_page {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                if let Some(p) = pointer {
+                    let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
+                    let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
+                    let style = cx.prefs.style(tool);
+                    let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
+                    cp.circle_filled(p, dot_r, color32(style.color));
+                    cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                }
             }
             let finish = resp.double_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
             // Backspace (or Delete) takes back the last point, e.g. after a wrong click; Undo does too.
@@ -811,7 +950,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 cv.undo_point();
                 return true;
             }
-            if resp.clicked()
+            if resp.clicked_by(egui::PointerButton::Primary)
                 && over_page
                 && let Some(p) = pointer
             {
@@ -1231,19 +1370,78 @@ fn paint_gesture(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
     }
 }
 
+/// Smooth a polyline using Catmull-Rom cubic Bézier splines (exact match to appearance::smooth_segments).
+fn smooth_polyline(pts: &[Pos2]) -> Vec<Pos2> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    // Pre-smooth jittered input points with a 3-point rolling filter
+    let mut filtered = Vec::with_capacity(n);
+    filtered.push(pts[0]);
+    for i in 1..n - 1 {
+        let p0 = pts[i - 1];
+        let p1 = pts[i];
+        let p2 = pts[i + 1];
+        filtered.push(Pos2::new(
+            0.2 * p0.x + 0.6 * p1.x + 0.2 * p2.x,
+            0.2 * p0.y + 0.6 * p1.y + 0.2 * p2.y,
+        ));
+    }
+    filtered.push(pts[n - 1]);
+
+    let mut smooth = Vec::with_capacity(n * 8);
+    smooth.push(filtered[0]);
+
+    for i in 0..n - 1 {
+        let p0 = if i == 0 { filtered[0] } else { filtered[i - 1] };
+        let p1 = filtered[i];
+        let p2 = filtered[i + 1];
+        let p3 = if i + 2 < n { filtered[i + 2] } else { p2 };
+
+        // Catmull-Rom to cubic Bézier control points (exact match to engine appearance::smooth_segments)
+        let c1 = p1 + (p2 - p0) / 6.0;
+        let c2 = p2 - (p3 - p1) / 6.0;
+
+        let d = p1.distance(p2);
+        let steps = ((d / 1.5).ceil() as usize).clamp(3, 20);
+        for s in 1..=steps {
+            let t = s as f32 / steps as f32;
+            let omt = 1.0 - t;
+            let pt = p1 * (omt * omt * omt)
+                + c1.to_vec2() * (3.0 * omt * omt * t)
+                + c2.to_vec2() * (3.0 * omt * t * t)
+                + p2.to_vec2() * (t * t * t);
+            smooth.push(pt);
+        }
+    }
+    smooth
+}
+
 /// A drawing tool's shape from its points (a live drag, or a released one still settling).
 fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, points: &[[f64; 2]]) {
     {
         let style = cx.prefs.style(*tool);
         let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
-        let stroke = Stroke::new((style.width as f32 * zoom).max(1.0), color32(style.color));
+        let color = color32(style.color).gamma_multiply(style.opacity as f32);
+        let stroke = Stroke::new((style.width as f32 * zoom).max(1.0), color);
         let pts: Vec<Pos2> = points.iter().map(|p| cx.to_screen(*p)).collect();
         match tool {
             CommentTool::Ink => {
-                painter.add(egui::Shape::line(pts, stroke));
+                if pts.len() == 1 {
+                    painter.circle_filled(pts[0], (stroke.width * 0.5).max(1.0), stroke.color);
+                } else if pts.len() >= 2 {
+                    let smooth = smooth_polyline(&pts);
+                    let r = (stroke.width * 0.5).max(1.0);
+                    painter.circle_filled(smooth[0], r, stroke.color);
+                    if let Some(last) = smooth.last() {
+                        painter.circle_filled(*last, r, stroke.color);
+                    }
+                    painter.add(egui::Shape::line(smooth, stroke));
+                }
             }
             CommentTool::Eraser => {
-                painter.add(egui::Shape::line(pts, Stroke::new(12.0, Color32::from_gray(128).gamma_multiply(0.35))));
+                // No trailing line behind the eraser cursor
             }
             CommentTool::Line | CommentTool::Arrow if pts.len() == 2 => {
                 painter.line_segment([pts[0], pts[1]], stroke);
@@ -1290,7 +1488,26 @@ fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
     let rect = [first[0].min(last[0]), first[1].min(last[1]), first[0].max(last[0]), first[1].max(last[1])];
     let big = rect[2] - rect[0] >= 2.0 && rect[3] - rect[1] >= 2.0;
     match tool {
-        CommentTool::Ink if !points.is_empty() => Some(Shape::Ink { strokes: vec![points.to_vec()] }),
+        CommentTool::Ink if !points.is_empty() => {
+            let smoothed = if points.len() >= 3 {
+                let mut s = Vec::with_capacity(points.len());
+                s.push(points[0]);
+                for i in 1..points.len() - 1 {
+                    let p_prev = points[i - 1];
+                    let p_curr = points[i];
+                    let p_next = points[i + 1];
+                    s.push([
+                        0.2 * p_prev[0] + 0.6 * p_curr[0] + 0.2 * p_next[0],
+                        0.2 * p_prev[1] + 0.6 * p_curr[1] + 0.2 * p_next[1],
+                    ]);
+                }
+                s.push(points[points.len() - 1]);
+                s
+            } else {
+                points.to_vec()
+            };
+            Some(Shape::Ink { strokes: vec![smoothed] })
+        }
         CommentTool::Line | CommentTool::Arrow if far => Some(Shape::Line {
             from: first,
             to: last,
@@ -1312,7 +1529,7 @@ fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
 /// Eraser: rub out drawings along `path` (user space); one undo step for all of them.
 fn erase(cx: &PageCx<'_>, path: &[[f64; 2]]) -> Option<Edit> {
     let zoom = (cx.xf.rect.width() / cx.xf.pw.max(1.0)) as f64;
-    let radius = (6.0 / zoom).max(1.0);
+    let radius = (12.0 / zoom).max(2.0);
     let b = path.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |r, p| [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])]);
     let mut hits: Vec<usize> = cx
         .comments()
@@ -1328,7 +1545,10 @@ fn erase(cx: &PageCx<'_>, path: &[[f64; 2]]) -> Option<Edit> {
     }
     // Later indices first: deleting an emptied drawing shifts the ones after it.
     hits.sort_unstable_by(|a, b| b.cmp(a));
-    let edits = hits.into_iter().map(|index| Edit::EraseInk { page: cx.page, index, path: path.to_vec(), radius }).collect();
+    let edits = hits
+        .into_iter()
+        .map(|index| Edit::EraseInk { page: cx.page, index, path: path.to_vec(), radius, whole_stroke: cx.prefs.stroke_eraser })
+        .collect();
     Some(Edit::Batch { label: "Erase".into(), edits })
 }
 
@@ -1424,14 +1644,15 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
             Some(new_comment(
                 &cx,
                 CommentTool::TextBox,
-                Shape::TextBox { rect: text_box_rect(c.at, &text, 12.0, page_rotation(info, page)), font_size: 12.0 },
+                Shape::TextBox { rect: text_box_rect(c.at, &text, prefs.text_box_font_size, page_rotation(info, page)), font_size: prefs.text_box_font_size },
                 text,
             ))
         }
         ComposerKind::Callout { point } => {
             view.comments.tool_done = true;
             // A callout's leader and box stay in user-space axes (its appearance isn't turned).
-            let rect = text_box_rect(c.at, &text, 10.0, 0);
+            let font_size = (prefs.text_box_font_size - 2.0).max(6.0);
+            let rect = text_box_rect(c.at, &text, font_size, 0);
             let side = if point[0] < rect[0] {
                 rect[0]
             } else if point[0] > rect[2] {
@@ -1440,7 +1661,7 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
                 (rect[0] + rect[2]) / 2.0
             };
             let knee = [(point[0] + side) / 2.0, (rect[1] + rect[3]) / 2.0];
-            Some(new_comment(&cx, CommentTool::Callout, Shape::Callout { rect, knee, point, font_size: 10.0, ending: LineEnding::OpenArrow }, text))
+            Some(new_comment(&cx, CommentTool::Callout, Shape::Callout { rect, knee, point, font_size, ending: LineEnding::OpenArrow }, text))
         }
         ComposerKind::Replace => {
             view.comments.tool_done = true;
@@ -1705,7 +1926,7 @@ pub fn remember_custom_colour(ctx: &egui::Context, c: Rgb) {
     });
 }
 
-fn same_colour(a: &Rgb, b: &Rgb) -> bool {
+pub(crate) fn same_colour(a: &Rgb, b: &Rgb) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02)
 }
 
@@ -1817,25 +2038,33 @@ pub fn fill_picker(ui: &mut egui::Ui, current: Option<Rgb>) -> Option<Option<Rgb
     picked
 }
 
-/// The comment tools' extra quick-bar controls: pin, colour, fill, opacity and thickness.
-pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &mut CommentPrefs) -> Option<Rgb> {
+/// The comment tools' extra quick-bar controls: pin, colour, fill, opacity, thickness and font size.
+pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &mut CommentPrefs) -> (Option<Rgb>, Option<f64>) {
     let style = prefs.style(tool);
     let mut selected_color = None;
+    let mut selected_font_size = None;
     if icons::button(ui, "pin", 32.0, prefs.pinned, if prefs.pinned { tl!("Keep tool selected: on") } else { tl!("Keep tool selected") }).clicked() {
         prefs.pinned = !prefs.pinned;
     }
-    let (r, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
-    ui.painter().circle_filled(r.center(), 9.0, color32(style.color));
-    ui.painter().circle_stroke(r.center(), 9.0, Stroke::new(1.0, Color32::from_black_alpha(50)));
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Colour")));
-    let resp = resp.on_hover_text(tl!("Colour"));
-    egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
-        if let Some(c) = swatch_grid(ui, Some(style.color)) {
-            prefs.set_color(tool, c);
-            selected_color = Some(c);
-            ui.close();
+    if tool == CommentTool::Eraser {
+        let label = if prefs.stroke_eraser { tl!("Stroke eraser (whole stroke)") } else { tl!("Segment eraser") };
+        if icons::button(ui, if prefs.stroke_eraser { "eraser" } else { "scissors" }, 32.0, prefs.stroke_eraser, label).clicked() {
+            prefs.stroke_eraser = !prefs.stroke_eraser;
         }
-    });
+    } else {
+        let (r, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+        ui.painter().circle_filled(r.center(), 9.0, color32(style.color));
+        ui.painter().circle_stroke(r.center(), 9.0, Stroke::new(1.0, Color32::from_black_alpha(50)));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Colour")));
+        let resp = resp.on_hover_text(tl!("Colour"));
+        egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
+            if let Some(c) = swatch_grid(ui, Some(style.color)) {
+                prefs.set_color(tool, c);
+                selected_color = Some(c);
+                ui.close();
+            }
+        });
+    }
     if tool.has_fill() {
         let resp = fill_button(ui, style.fill);
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
@@ -1846,27 +2075,70 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
             }
         });
     }
-    let resp = icons::button(ui, "blend", 32.0, false, tl!("Opacity"));
-    egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-        ui.set_min_width(180.0);
-        let mut percent = (style.opacity * 100.0).round();
-        ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0)));
-        if ui.add(egui::Slider::new(&mut percent, 10.0..=100.0).step_by(5.0).suffix(" %")).changed() {
-            prefs.set_opacity(tool, percent / 100.0);
-        }
-    });
+    if tool != CommentTool::Eraser {
+        let resp = icons::button(ui, "blend", 32.0, false, tl!("Opacity"));
+        egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(190.0);
+            ui.spacing_mut().slider_width = 135.0;
+            let mut percent = (style.opacity * 100.0).round();
+            ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0)));
+            if ui.add(egui::Slider::new(&mut percent, 10.0..=100.0).step_by(5.0).suffix(" %").trailing_fill(true)).changed() {
+                prefs.set_opacity(tool, percent / 100.0);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for (val, label) in [(100.0, "100%"), (75.0, "75%"), (50.0, "50%"), (25.0, "25%")] {
+                    let selected = (percent - val).abs() < 2.0;
+                    if ui.selectable_label(selected, label).clicked() {
+                        prefs.set_opacity(tool, val / 100.0);
+                    }
+                }
+            });
+        });
+    }
     if tool.has_width() {
         let resp = icons::button(ui, "sliders-horizontal", 32.0, false, tl!("Line thickness"));
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_min_width(180.0);
+            ui.set_min_width(190.0);
+            ui.spacing_mut().slider_width = 135.0;
             let mut w = style.width;
             ui.label(egui::RichText::new(tl!("Line thickness")).font(theme::semibold(12.0)));
-            if ui.add(egui::Slider::new(&mut w, 0.5..=12.0).step_by(0.5).suffix(" pt")).changed() {
+            if ui.add(egui::Slider::new(&mut w, 0.5..=16.0).step_by(0.5).suffix(" pt").trailing_fill(true)).changed() {
                 prefs.set_width(tool, w);
             }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for (val, label) in [(1.0, "1 pt"), (2.0, "2 pt"), (4.0, "4 pt"), (8.0, "8 pt")] {
+                    let selected = (style.width - val).abs() < 0.25;
+                    if ui.selectable_label(selected, label).clicked() {
+                        prefs.set_width(tool, val);
+                    }
+                }
+            });
         });
     }
-    selected_color
+    if matches!(tool, CommentTool::TextBox | CommentTool::Callout) {
+        let resp = icons::button(ui, "type", 32.0, false, tl!("Font size"));
+        egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(190.0);
+            ui.spacing_mut().slider_width = 135.0;
+            ui.label(egui::RichText::new(tl!("Font size")).font(theme::semibold(12.0)));
+            if ui.add(egui::Slider::new(&mut prefs.text_box_font_size, 6.0..=72.0).step_by(1.0).suffix(" pt").trailing_fill(true)).changed() {
+                selected_font_size = Some(prefs.text_box_font_size);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for size in [8.0, 10.0, 12.0, 14.0, 18.0, 24.0, 36.0] {
+                    let selected = (prefs.text_box_font_size - size).abs() < 0.5;
+                    if ui.selectable_label(selected, format!("{size:.0} pt")).clicked() {
+                        prefs.text_box_font_size = size;
+                        selected_font_size = Some(size);
+                    }
+                }
+            });
+        });
+    }
+    (selected_color, selected_font_size)
 }
 
 /// The quick bar's fill button: a filled square in the fill colour, or a crossed-out outline

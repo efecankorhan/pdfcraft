@@ -2331,7 +2331,7 @@ pub fn add_text_replacement(
 /// The Eraser (Draw tools): remove the parts of drawing `(page, index)` within `radius` points
 /// of `path`, splitting strokes where they are cut. A drawing with nothing left is deleted.
 /// Returns whether anything was erased.
-pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]], radius: f64, meta: &Meta) -> Result<bool, AnnotError> {
+pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]], radius: f64, whole_stroke: bool, meta: &Meta) -> Result<bool, AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     unlocked(doc, r)?;
     let d = annot_dict(doc, r);
@@ -2365,35 +2365,67 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
             (p[0] - (a[0] + t * dx)).hypot(p[1] - (a[1] + t * dy)) <= radius
         })
     };
+    let path_b = bounds(path.iter().copied()).unwrap_or_default();
+    let (min_x, min_y, max_x, max_y) = (path_b[0], path_b[1], path_b[2], path_b[3]);
     let mut kept: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut erased = false;
-    for s in &strokes {
-        // Densify so long segments are cut where the eraser crosses them.
-        let mut pts: Vec<[f64; 2]> = Vec::new();
-        for w in s.windows(2) {
-            let n = ((w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) / (radius / 2.0)).ceil().clamp(1.0, 2000.0) as usize;
-            for k in 0..n {
-                let t = k as f64 / n as f64;
-                pts.push([w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]);
+    if whole_stroke {
+        for s in &strokes {
+            let in_bounds = bounds(s.iter().copied())
+                .is_some_and(|b| b[0] <= max_x + radius && b[2] >= min_x - radius && b[1] <= max_y + radius && b[3] >= min_y - radius);
+            if !in_bounds {
+                kept.push(s.clone());
+                continue;
             }
-        }
-        if let Some(last) = s.last() {
-            pts.push(*last);
-        }
-        let mut run: Vec<[f64; 2]> = Vec::new();
-        for p in pts {
-            if near(p) {
+            let hit = s.windows(2).any(|w| {
+                let n = ((w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) / (radius / 2.0)).ceil().clamp(1.0, 2000.0) as usize;
+                (0..=n).any(|k| {
+                    let t = k as f64 / n as f64;
+                    near([w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t])
+                })
+            }) || s.last().is_some_and(|&p| near(p));
+
+            if hit {
                 erased = true;
-                if run.len() >= 2 {
-                    kept.push(std::mem::take(&mut run));
-                }
-                run.clear();
             } else {
-                run.push(p);
+                kept.push(s.clone());
             }
         }
-        if run.len() >= 2 {
-            kept.push(run);
+    } else {
+        for s in &strokes {
+            let in_bounds = bounds(s.iter().copied())
+                .is_some_and(|b| b[0] <= max_x + radius && b[2] >= min_x - radius && b[1] <= max_y + radius && b[3] >= min_y - radius);
+            if !in_bounds {
+                kept.push(s.clone());
+                continue;
+            }
+            // Densify so long segments are cut where the eraser crosses them.
+            let mut pts: Vec<[f64; 2]> = Vec::new();
+            for w in s.windows(2) {
+                let n = ((w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) / (radius / 2.0)).ceil().clamp(1.0, 2000.0) as usize;
+                for k in 0..n {
+                    let t = k as f64 / n as f64;
+                    pts.push([w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]);
+                }
+            }
+            if let Some(last) = s.last() {
+                pts.push(*last);
+            }
+            let mut run: Vec<[f64; 2]> = Vec::new();
+            for p in pts {
+                if near(p) {
+                    erased = true;
+                    if run.len() >= 2 {
+                        kept.push(std::mem::take(&mut run));
+                    }
+                    run.clear();
+                } else {
+                    run.push(p);
+                }
+            }
+            if run.len() >= 2 {
+                kept.push(run);
+            }
         }
     }
     if !erased {

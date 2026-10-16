@@ -1253,7 +1253,10 @@ fn a_middle_drag_with_a_drawing_tool_scrolls_instead_of_drawing() {
 
 #[test]
 fn erasing_part_of_a_drawing() {
-    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    let mut h = harness(|app| {
+        app.comment_prefs.stroke_eraser = false;
+        app.set_option("quick", "ink").unwrap();
+    });
     drag_pt(&mut h, (40.0, 60.0), (260.0, 60.0));
     assert_eq!(comments(&h).len(), 1);
     h.state_mut().set_option("quick", "eraser").unwrap();
@@ -1266,6 +1269,15 @@ fn erasing_part_of_a_drawing() {
     // Rubbing along the rest removes the drawing.
     drag_pt(&mut h, (40.0, 60.0), (260.0, 60.0));
     assert!(comments(&h).is_empty(), "{:?}", comments(&h));
+
+    // Stroke eraser removes entire continuous stroke when touched
+    h.state_mut().comment_prefs.stroke_eraser = true;
+    h.state_mut().set_option("quick", "ink").unwrap();
+    drag_pt(&mut h, (40.0, 60.0), (260.0, 60.0));
+    assert_eq!(comments(&h).len(), 1);
+    h.state_mut().set_option("quick", "eraser").unwrap();
+    drag_pt(&mut h, (150.0, 90.0), (150.0, 30.0));
+    assert!(comments(&h).is_empty(), "whole stroke removed");
 }
 
 #[test]
@@ -1444,3 +1456,74 @@ fn text_box_properties_change_the_font_size() {
     assert_eq!(doc.comment_props(0, 0).unwrap().font_size, Some(30.0));
     assert_eq!(doc.can_undo(), Some("Change comment properties"));
 }
+
+#[test]
+fn selected_text_highlight_color_swatches_apply_color() {
+    use pdfcraft_ui_egui::comments::CommentTool;
+    let mut h = harness(|_| {});
+    h.state_mut().views[0].select_text(0, 4, 8);
+    h.run_steps(3);
+    h.get_by_label("Green").click();
+    h.run_steps(3);
+    let c = comments(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].subtype, "Highlight");
+    assert_eq!(c[0].color, Some([0.18, 0.62, 0.36]));
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Highlight).color, [0.18, 0.62, 0.36]);
+}
+
+#[test]
+fn radial_menu_tablet_handwriting_palette() {
+    use pdfcraft_ui_egui::comments::CommentTool;
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    let mut h = harness(|_| {});
+    let p = at(&h, 150.0, 100.0);
+    h.state_mut().views[0].comments.radial_menu = Some(RadialMenu {
+        screen_pos: p,
+        page: 0,
+        at: [150.0, 100.0],
+        mode: RadialMode::Tools,
+        opened_at: 0.0,
+    });
+    h.run_steps(3);
+    assert!(h.state().views[0].comments.radial_menu.is_some());
+
+    // Switching to Freehand Highlighter and back to Pen preserves separate styles
+    h.state_mut().comment_prefs.set_color(CommentTool::Ink, [0.0, 0.47, 0.84]);
+    h.state_mut().comment_prefs.set_width(CommentTool::Ink, 3.0);
+    h.state_mut().comment_prefs.activate_freehand_highlighter();
+    assert!(h.state().comment_prefs.is_freehand_highlighter());
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).opacity, 0.4);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).width, 10.0);
+
+    h.state_mut().comment_prefs.activate_pen();
+    assert!(!h.state().comment_prefs.is_freehand_highlighter());
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).opacity, 1.0);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).width, 3.0);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).color, [0.0, 0.47, 0.84]);
+
+    // Exercise Thickness, FontSize, and More modes
+    for mode in [RadialMode::Thickness, RadialMode::FontSize, RadialMode::More] {
+        h.state_mut().views[0].comments.radial_menu.as_mut().unwrap().mode = mode;
+        h.run_steps(2);
+    }
+
+    // Second right-click toggles the radial menu closed
+    h.event(egui::Event::PointerMoved(p));
+    h.event(egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Secondary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Secondary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(2);
+    assert!(h.state().views[0].comments.radial_menu.is_none());
+}
+
+

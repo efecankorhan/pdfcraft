@@ -727,9 +727,10 @@ pub(crate) fn type_box(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
             r.request_focus();
             t.focus = false;
         }
+        let submitted = crate::comments::submit_key(ui, &r, true);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             cancel = true;
-        } else if r.lost_focus() {
+        } else if submitted || r.lost_focus() {
             commit = true;
         }
     });

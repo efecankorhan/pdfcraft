@@ -564,8 +564,9 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
                 .rect;
             // Pressing a button takes the focus from the text: that is not a click away.
             let on_buttons = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| buttons.contains(p));
+            let submitted = crate::comments::submit_key(ui, &resp, false);
             cancel |= ui.input(|i| i.key_pressed(egui::Key::Escape));
-            commit = done || resp.lost_focus() && !on_buttons && !view.objects.hold_editor;
+            commit = done || submitted || (resp.lost_focus() && !on_buttons && !view.objects.hold_editor);
         });
         // Page text is drawn with the standard fonts; anything else would be saved as `?` (#125).
         undrawable = self::undrawable(t, memo);

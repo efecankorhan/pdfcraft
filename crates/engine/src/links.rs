@@ -226,7 +226,8 @@ pub fn read_remote_document(path: &Path) -> Result<Vec<u8>, RemoteDocumentPathEr
         return Err(RemoteDocumentPathError::TooLarge);
     }
     let file = std::fs::File::open(path).map_err(|e| RemoteDocumentPathError::Read(e.to_string()))?;
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    let cap = usize::try_from(meta.len()).unwrap_or(0).min(64 * 1024);
+    let mut bytes = Vec::with_capacity(cap);
     file.take(MAX_REMOTE_DOCUMENT_BYTES.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| RemoteDocumentPathError::Read(e.to_string()))?;
     if u64::try_from(bytes.len()).map_or(true, |n| n > MAX_REMOTE_DOCUMENT_BYTES) {
         return Err(RemoteDocumentPathError::TooLarge);

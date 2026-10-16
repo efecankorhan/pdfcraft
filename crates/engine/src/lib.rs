@@ -1369,6 +1369,7 @@ pub enum Edit {
         index: usize,
         path: Vec<[f64; 2]>,
         radius: f64,
+        whole_stroke: bool,
     },
     /// Replace Text: strike out `quads` and add a grouped caret holding `text`.
     ReplaceText {
@@ -2364,8 +2365,8 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::SetAnnotationStatus { page, index, state, author } => {
             pdfcraft_annot::set_review_state(doc, *page, *index, *state, author, &cx.meta())?;
         }
-        Edit::EraseInk { page, index, path, radius } => {
-            pdfcraft_annot::erase_ink(doc, *page, *index, path, *radius, &cx.meta())?;
+        Edit::EraseInk { page, index, path, radius, whole_stroke } => {
+            pdfcraft_annot::erase_ink(doc, *page, *index, path, *radius, *whole_stroke, &cx.meta())?;
         }
         Edit::ReplaceText { page, quads, text, author, strike, caret } => {
             pdfcraft_annot::add_text_replacement(doc, *page, quads, text, author, strike, caret, &cx.meta())?;
@@ -3286,7 +3287,8 @@ impl Session {
         let doc = self.get(id).ok_or("no such document")?;
         let ends = doc.revision_ends();
         let end = *n.checked_sub(1).and_then(|i| ends.get(i)).ok_or_else(|| format!("the document has {} revision(s)", ends.len()))?;
-        let name = format!("{} (revision {n}).pdf", doc.name.trim_end_matches(".pdf"));
+        let stem = std::path::Path::new(&doc.name).file_stem().and_then(|s| s.to_str()).unwrap_or(&doc.name);
+        let name = format!("{stem} (revision {n}).pdf");
         let (bytes, password) = (Arc::new(doc.bytes[..end.min(doc.bytes.len())].to_vec()), doc.password.clone());
         self.open(name, None, bytes, password.as_deref()).map_err(|e| e.to_string())
     }
@@ -4542,6 +4544,7 @@ impl Session {
         let mut cuts = Vec::new();
         let mut used = 0usize;
         for p in 0..n {
+            // shortcut: serializes each page as a 1-page PDF to get exact size; upgrade to object size sum if 10k+ page files are slow
             let size = self.write_unchecked(&pdfcraft_organize::extract_pages(src, &[p])?)?.len();
             if used > 0 && used + size > max_bytes {
                 cuts.push(p);

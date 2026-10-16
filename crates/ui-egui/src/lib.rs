@@ -136,6 +136,7 @@ pub mod scroll_speed;
 #[cfg(not(target_arch = "wasm32"))]
 mod system_fonts;
 mod tab_context;
+pub mod radial_menu;
 pub mod theme;
 pub mod ui_scale;
 pub mod updates;
