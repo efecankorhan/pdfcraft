@@ -260,6 +260,10 @@ pub struct CommentPrefs {
     pub pen_style: (Rgb, f64),
     /// Saved (color, width) for translucent Freehand Highlighter mode on `CommentTool::Ink`.
     pub highlighter_style: (Rgb, f64),
+    /// Customizable 8-color palette displayed in the radial menu.
+    pub radial_palette: [Rgb; 8],
+    /// Which slot (0..8) in `radial_palette` is targeted when picking a custom colour.
+    pub selected_palette_slot: usize,
 }
 
 impl Default for CommentPrefs {
@@ -275,6 +279,17 @@ impl Default for CommentPrefs {
             text_box_font_size: 12.0,
             pen_style: (ink_default.color, ink_default.width),
             highlighter_style: ([1.0, 0.94, 0.0], 10.0),
+            radial_palette: [
+                [0.0, 0.0, 0.0],     // Black
+                [0.0, 0.47, 0.84],   // Blue
+                [0.36, 0.75, 0.98],  // Cyan
+                [0.18, 0.62, 0.36],  // Green
+                [1.0, 0.94, 0.0],    // Yellow
+                [1.0, 0.54, 0.0],    // Orange
+                [0.89, 0.13, 0.13],  // Red
+                [0.54, 0.25, 0.82],  // Purple
+            ],
+            selected_palette_slot: 4,
         }
     }
 }
@@ -322,6 +337,9 @@ impl CommentPrefs {
     }
 
     pub fn set_color(&mut self, tool: CommentTool, c: Rgb) {
+        if let Some(idx) = self.radial_palette.iter().position(|s| same_colour(s, &c)) {
+            self.selected_palette_slot = idx;
+        }
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             s.color = c;
             if tool == CommentTool::Ink {
@@ -332,6 +350,12 @@ impl CommentPrefs {
                 }
             }
         }
+    }
+
+    /// Update the radial palette: replaces the currently selected slot (0..8) with `c`.
+    pub fn update_radial_palette(&mut self, c: Rgb) {
+        let slot = self.selected_palette_slot.min(self.radial_palette.len() - 1);
+        self.radial_palette[slot] = c;
     }
 
     pub fn set_width(&mut self, tool: CommentTool, w: f64) {
@@ -447,6 +471,8 @@ pub enum Gesture {
     Move { page: usize, index: usize, from: Pos2 },
     /// Resizing a comment by one of its handles: (dx, dy) ∈ {-1, 0, 1}² says which sides move.
     Resize { page: usize, index: usize, handle: (i8, i8), from: Pos2, aspect_ratio: Option<f32> },
+    /// Freehand lasso selection loop: points in user space.
+    Lasso { page: usize, points: Vec<[f64; 2]> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -522,12 +548,17 @@ impl CommentView {
 pub struct CommentView {
     /// The selected comment: (page, index in `/Annots`).
     pub selected: Option<(usize, usize)>,
+    /// Additional annotation indices on `selected.0` enclosed by a multi-stroke lasso.
+    pub also: Vec<usize>,
     pub gesture: Option<Gesture>,
+    /// Live continuous erasing in progress during an eraser drag.
+    pub(crate) erasing: bool,
+    pub(crate) last_eraser_pos: Option<(usize, Pos2)>,
     /// Drawings just released: shown from their points until the page raster that includes the
     /// committed annotation arrives, so the stroke never vanishes in between (#1858).
     pub(crate) settling: Vec<Settling>,
-    /// Escape ends egui's drag too; ignore its synthetic release until the mouse is up.
-    cancelled_drag: bool,
+    /// Escape or radial menu ends a drag; ignore its synthetic release until the pointer is up.
+    pub(crate) cancelled_drag: bool,
     pub composer: Option<Composer>,
     /// Reply being typed under the selected card.
     pub reply: String,
@@ -563,8 +594,6 @@ pub struct CommentView {
     pub context_at: Option<(usize, [f64; 2])>,
     /// Radial / arc tool palette for stylus and graphic tablet handwriting:
     pub radial_menu: Option<crate::radial_menu::RadialMenu>,
-    /// Last (page, screen position) of the eraser while dragging, for real-time stroke removal.
-    pub last_eraser_pos: Option<(usize, Pos2)>,
     /// A one-shot tool just finished; the app returns to the Select tool unless pinned.
     pub tool_done: bool,
 }
@@ -610,6 +639,8 @@ pub(crate) struct PageCx<'a> {
     pub allowed: bool,
     /// Comments are hidden (Hide all comments): nothing to select.
     pub hidden: bool,
+    /// A right-click in Select mode landed on a page image.
+    pub over_image: bool,
 }
 
 impl PageCx<'_> {
@@ -784,30 +815,42 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
     let over_page = pointer.is_some_and(|p| page_rect.contains(p));
     let fill_grab = fill_grabs(ui, cx, view);
     let draw_grab = draw_grabs(ui, cx, view);
+    let lasso_grab = lasso_grabs(ui, cx, view);
     let caret_text = if cx.tool == QuickTool::Comment(CommentTool::Caret) { view.page_text(cx.page) } else { None };
+    let has_selected_text = view.selected_text().is_some_and(|t| !t.is_empty());
+    let has_link_context = view.links.context.is_some();
     let cv = &mut view.comments;
-    if cv.gesture.is_some() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+    if cv.radial_menu.is_some() {
         cv.gesture = None;
         cv.cancelled_drag = true;
         return true;
     }
-    if cv.cancelled_drag {
-        return true;
+    let (secondary_pressed, secondary_down, secondary_released) = ui.input(|i| (
+        i.pointer.button_pressed(egui::PointerButton::Secondary),
+        i.pointer.secondary_down(),
+        i.pointer.button_released(egui::PointerButton::Secondary),
+    ));
+    if secondary_pressed || secondary_down || secondary_released {
+        cv.gesture = None;
+        cv.cancelled_drag = true;
     }
-    if resp.secondary_clicked()
+    if (resp.secondary_clicked() || (secondary_released && over_page))
         && let Some(p) = pointer.filter(|p| page_rect.contains(*p))
     {
         cv.gesture = None;
-        cv.cancelled_drag = false;
-        if cv.radial_menu.take().is_some() {
-            return true;
-        }
+        cv.cancelled_drag = true;
         cv.context_at = Some((cx.page, cx.to_user(p)));
-        let is_freehand = matches!(cx.tool, QuickTool::Comment(CommentTool::Ink | CommentTool::Eraser));
+        let is_freehand = matches!(cx.tool, QuickTool::Lasso | QuickTool::Comment(CommentTool::Ink | CommentTool::Eraser));
         if !is_freehand {
             cv.selected = cx.hit(p).map(|a| (cx.page, a.index));
+            cv.also.clear();
         }
-        if is_freehand || cv.selected.is_none() {
+        if is_freehand
+            || (cv.selected.is_none()
+                && !has_link_context
+                && !has_selected_text
+                && !(cx.tool == QuickTool::Select && cx.over_image))
+        {
             cv.radial_menu = Some(crate::radial_menu::RadialMenu {
                 screen_pos: p,
                 page: cx.page,
@@ -818,7 +861,15 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             return true;
         }
     }
-    if cv.radial_menu.is_some() {
+    if secondary_pressed || secondary_down {
+        return true;
+    }
+    if cv.gesture.is_some() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        cv.gesture = None;
+        cv.cancelled_drag = true;
+        return true;
+    }
+    if cv.cancelled_drag {
         return true;
     }
     match cx.tool {
@@ -830,57 +881,39 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 return false;
             }
             if over_page {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-                if let Some(p) = pointer {
-                    let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
-                    if tool == CommentTool::Eraser {
-                        cp.circle_filled(p, 7.5, Color32::WHITE);
-                        cp.circle_stroke(p, 7.5, Stroke::new(1.5, Color32::BLACK));
-                        cp.circle_filled(p, 1.0, Color32::from_black_alpha(160));
-                    } else {
-                        let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
-                        let style = cx.prefs.style(tool);
-                        let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
-                        cp.circle_filled(p, dot_r, color32(style.color));
-                        cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
-                    }
-                }
-            }
-            if tool == CommentTool::Eraser {
-                let down = ui.input(|i| i.pointer.primary_down()) || resp.dragged() || resp.clicked();
-                if down && over_page && let Some(p) = pointer {
-                    let u = cx.to_user(p);
-                    let path = match cv.last_eraser_pos {
-                        Some((last_page, last_p)) if last_page == cx.page => vec![cx.to_user(last_p), u],
-                        _ => vec![u],
-                    };
-                    if let Some(edit) = erase(cx, &path) {
-                        match &mut view.pending_edit {
-                            None => view.pending_edit = Some(edit),
-                            Some(Edit::Batch { label, edits }) if label == "Erase" => {
-                                if let Edit::Batch { edits: new_edits, .. } = edit {
-                                    edits.extend(new_edits);
-                                } else {
-                                    edits.push(edit);
-                                }
-                            }
-                            _ => {}
+                if matches!(tool, CommentTool::Ink | CommentTool::Eraser) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                    if let Some(p) = pointer {
+                        let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
+                        if tool == CommentTool::Eraser {
+                            cp.circle_filled(p, 7.5, Color32::WHITE);
+                            cp.circle_stroke(p, 7.5, Stroke::new(1.5, Color32::BLACK));
+                            cp.circle_filled(p, 1.0, Color32::from_black_alpha(160));
+                        } else {
+                            let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
+                            let style = cx.prefs.style(tool);
+                            let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
+                            cp.circle_filled(p, dot_r, color32(style.color));
+                            cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
                         }
                     }
-                    cv.last_eraser_pos = Some((cx.page, p));
-                } else if !down {
-                    cv.last_eraser_pos = None;
+                } else {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
-                return true;
             }
-
             let is_down = ui.input(|i| i.pointer.primary_down());
-            if resp.drag_started()
+            if resp.drag_started_by(egui::PointerButton::Primary)
                 && pressed_here
                 && let Some(o) = origin
             {
                 cv.gesture = Some(Gesture::Draw { page: cx.page, tool, points: vec![cx.to_user(o)] });
-                cv.selected = None;
+                if tool != CommentTool::Eraser {
+                    cv.selected = None;
+                    cv.also.clear();
+                } else {
+                    cv.erasing = false;
+                    cv.last_eraser_pos = Some((cx.page, o));
+                }
             }
             if let Some(Gesture::Draw { page, tool, points }) = cv.gesture.as_mut()
                 && *page == cx.page
@@ -888,7 +921,23 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             {
                 let p = clamp_to(page_rect, p);
                 let u = cx.to_user(p);
-                if *tool == CommentTool::Ink {
+                if *tool == CommentTool::Eraser {
+                    let path = match cv.last_eraser_pos {
+                        Some((last_page, last_p)) if last_page == cx.page => vec![cx.to_user(last_p), u],
+                        _ => vec![u],
+                    };
+                    if let Some(edit) = erase(cx, &path, cv.erasing) {
+                        cv.erasing = true;
+                        match &mut view.pending_edit {
+                            Some(Edit::Batch { edits, .. }) => match edit {
+                                Edit::Batch { edits: e, .. } => edits.extend(e),
+                                other => edits.push(other),
+                            },
+                            pending => *pending = Some(edit),
+                        }
+                    }
+                    cv.last_eraser_pos = Some((cx.page, p));
+                } else if *tool == CommentTool::Ink {
                     let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(p);
                     if last.distance(p) >= 2.0 {
                         points.push(u);
@@ -898,28 +947,38 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     points.push(u);
                 }
             }
-            if (resp.drag_stopped() || (!is_down && cv.gesture.is_some()))
+            let mut committed = false;
+            if (resp.drag_stopped_by(egui::PointerButton::Primary) || (!is_down && cv.gesture.is_some()))
                 && matches!(cv.gesture, Some(Gesture::Draw { page, .. }) if page == cx.page)
                 && let Some(Gesture::Draw { page, tool, points }) = cv.gesture.take()
-                && let Some(shape) = drawn_shape(tool, &points)
             {
-                let now = ui.input(|i| i.time);
-                cv.settle(now, page, tool, &points);
-                view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                if tool == CommentTool::Eraser {
+                    cv.erasing = false;
+                    cv.last_eraser_pos = None;
+                } else if let Some(shape) = drawn_shape(tool, &points) {
+                    let now = ui.input(|i| i.time);
+                    cv.settle(now, page, tool, &points);
+                    view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                    committed = true;
+                }
             }
-            // A quick press/release does not start an egui drag, but Acrobat's Draw tool treats
-            // it as a one-point ink stroke (a dot). The appearance uses round line caps, so a
-            // single PDF point is visible and remains editable like any other drawing.
-            if tool == CommentTool::Ink
-                && resp.clicked()
+            if !committed
+                && resp.clicked_by(egui::PointerButton::Primary)
                 && over_page
                 && let Some(p) = pointer
-                && let Some(shape) = drawn_shape(tool, &[cx.to_user(p)])
             {
-                cv.selected = None;
-                let now = ui.input(|i| i.time);
-                cv.settle(now, cx.page, tool, &[cx.to_user(p)]);
-                view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                if tool == CommentTool::Eraser {
+                    view.pending_edit = erase(cx, &[cx.to_user(p)], false);
+                } else if tool == CommentTool::Ink {
+                    let pts = vec![cx.to_user(p)];
+                    if let Some(shape) = drawn_shape(tool, &pts) {
+                        let now = ui.input(|i| i.time);
+                        cv.settle(now, cx.page, tool, &pts);
+                        cv.selected = None;
+                        cv.also.clear();
+                        view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                    }
+                }
             }
             true
         }
@@ -928,15 +987,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 return false;
             }
             if over_page {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-                if let Some(p) = pointer {
-                    let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
-                    let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
-                    let style = cx.prefs.style(tool);
-                    let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
-                    cp.circle_filled(p, dot_r, color32(style.color));
-                    cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
-                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
             let finish = resp.double_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
             // Backspace (or Delete) takes back the last point, e.g. after a wrong click; Undo does too.
@@ -975,6 +1026,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     _ => {
                         cv.gesture = Some(Gesture::Draw { page: cx.page, tool, points: vec![u] });
                         cv.selected = None;
+                        cv.also.clear();
                     }
                 }
             }
@@ -998,12 +1050,13 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             if over_page {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
-            if resp.drag_started()
+            if resp.drag_started_by(egui::PointerButton::Primary)
                 && pressed_here
                 && let Some(o) = origin
             {
                 cv.gesture = Some(Gesture::Draw { page: cx.page, tool: CommentTool::Callout, points: vec![cx.to_user(o)] });
                 cv.selected = None;
+                cv.also.clear();
             }
             if let Some(Gesture::Draw { page, points, .. }) = cv.gesture.as_mut()
                 && *page == cx.page
@@ -1012,7 +1065,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 points.truncate(1);
                 points.push(cx.to_user(clamp_to(page_rect, p)));
             }
-            if resp.drag_stopped()
+            if resp.drag_stopped_by(egui::PointerButton::Primary)
                 && let Some(Gesture::Draw { page, points, .. }) = cv.gesture.clone()
                 && page == cx.page
             {
@@ -1032,12 +1085,13 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             if over_page {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
-            if resp.clicked()
+            if resp.clicked_by(egui::PointerButton::Primary)
                 && over_page
                 && let Some(p) = pointer
             {
                 cv.attach_at = Some((cx.page, cx.to_user(p)));
                 cv.selected = None;
+                cv.also.clear();
             }
             true
         }
@@ -1048,7 +1102,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             if over_page {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
             }
-            if resp.clicked()
+            if resp.clicked_by(egui::PointerButton::Primary)
                 && over_page
                 && let Some(p) = pointer
             {
@@ -1057,6 +1111,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 let (at, size) = snapped.unwrap_or_else(|| (cx.to_user(p), CARET_SIZE));
                 cv.composer = Some(Composer { page: cx.page, at, kind: ComposerKind::Caret { size }, text: String::new(), focus: true });
                 cv.selected = None;
+                cv.also.clear();
             }
             true
         }
@@ -1067,20 +1122,109 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             if over_page {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
-            if resp.clicked()
+            if resp.clicked_by(egui::PointerButton::Primary)
                 && over_page
                 && let Some(p) = pointer
             {
                 let kind = if tool == CommentTool::Note { ComposerKind::Note } else { ComposerKind::TextBox };
                 cv.composer = Some(Composer { page: cx.page, at: cx.to_user(p), kind, text: String::new(), focus: true });
                 cv.selected = None;
+                cv.also.clear();
             }
             true
         }
         QuickTool::Select => select_input(ui, resp, cx, view, pointer, origin, pressed_here),
         QuickTool::Fill(_) if fill_grab => select_input(ui, resp, cx, view, pointer, origin, pressed_here),
+        QuickTool::Lasso => {
+            if !cx.allowed {
+                return false;
+            }
+            if lasso_grab {
+                return select_input(ui, resp, cx, view, pointer, origin, pressed_here);
+            }
+            if over_page {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            let is_down = ui.input(|i| i.pointer.primary_down());
+            if resp.drag_started_by(egui::PointerButton::Primary)
+                && pressed_here
+                && let Some(o) = origin
+            {
+                cv.gesture = Some(Gesture::Lasso { page: cx.page, points: vec![cx.to_user(o)] });
+            }
+            if let Some(Gesture::Lasso { page, points }) = cv.gesture.as_mut()
+                && *page == cx.page
+                && let Some(p) = pointer
+            {
+                let p = clamp_to(page_rect, p);
+                let u = cx.to_user(p);
+                let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(p);
+                if last.distance(p) >= 2.0 {
+                    points.push(u);
+                }
+            }
+            if (resp.drag_stopped_by(egui::PointerButton::Primary) || (!is_down && cv.gesture.is_some()))
+                && matches!(cv.gesture, Some(Gesture::Lasso { page, .. }) if page == cx.page)
+                && let Some(Gesture::Lasso { page, points }) = cv.gesture.take()
+                && points.len() >= 3
+            {
+                let hits: Vec<usize> = cx.comments().filter(|a| comment_in_lasso(a, &points)).map(|a| a.index).collect();
+                cv.also.clear();
+                if let Some((&last, rest)) = hits.split_last() {
+                    cv.selected = Some((page, last));
+                    cv.also.extend_from_slice(rest);
+                } else {
+                    cv.selected = None;
+                }
+                cv.reveal = true;
+            }
+            if resp.clicked_by(egui::PointerButton::Primary)
+                && over_page
+                && let Some(p) = pointer
+            {
+                cv.selected = cx.hit(p).map(|a| (cx.page, a.index));
+                cv.also.clear();
+                cv.reveal = true;
+            }
+            true
+        }
         _ => false,
     }
+}
+
+/// Union screen bounding box of the currently selected annotation and any `also` annotations on `cx.page`.
+fn selected_group_rect(cx: &PageCx<'_>, cv: &CommentView) -> Option<Rect> {
+    let (page, idx) = cv.selected?;
+    if page != cx.page {
+        return None;
+    }
+    let mut union = cx.get(idx).map(|a| cx.screen_rect(a))?;
+    for &i in &cv.also {
+        if let Some(a) = cx.get(i) {
+            union = union.union(cx.screen_rect(a));
+        }
+    }
+    Some(union.expand(4.0))
+}
+
+/// In Lasso mode, dragging a resize handle or dragging inside the already-selected annotation(s)
+/// moves/resizes the selection through `select_input` across the entire gesture.
+fn lasso_grabs(ui: &egui::Ui, cx: &PageCx<'_>, view: &DocView) -> bool {
+    if cx.hidden {
+        return false;
+    }
+    let cv = &view.comments;
+    if matches!(cv.gesture, Some(Gesture::Move { page, .. } | Gesture::Resize { page, .. }) if page == cx.page) {
+        return true;
+    }
+    if matches!(cv.gesture, Some(Gesture::Lasso { .. })) {
+        return false;
+    }
+    let Some(p) = press_point(ui, cx) else { return false };
+    on_handle(cx, view, p, |_| true)
+        || (cv.selected.is_some_and(|(page, _)| page == cx.page)
+            && (cx.hit(p).is_some_and(|a| !is_markup(&a.subtype))
+                || selected_group_rect(cx, cv).is_some_and(|r| r.contains(p))))
 }
 
 /// With a Fill & Sign tool, the Fill & Sign marks already on the page are picked up as with the
@@ -1102,9 +1246,13 @@ pub(crate) fn select_grabs(ui: &egui::Ui, cx: &PageCx<'_>, view: &DocView) -> bo
 /// are picked up as with the Select tool, so the shape just drawn can be resized straight away
 /// (#2338). Only the handles: a press anywhere else, the shape itself included, still draws.
 pub(crate) fn draw_grabs(ui: &egui::Ui, cx: &PageCx<'_>, view: &DocView) -> bool {
-    let QuickTool::Comment(tool) = cx.tool else { return false };
-    if !(tool.draws() || tool.clicks_points()) || tool == CommentTool::Eraser || cx.hidden {
+    if cx.hidden {
         return false;
+    }
+    match cx.tool {
+        QuickTool::Lasso => {}
+        QuickTool::Comment(tool) if (tool.draws() || tool.clicks_points()) && tool != CommentTool::Eraser => {}
+        _ => return false,
     }
     let cv = &view.comments;
     if matches!(cv.gesture, Some(Gesture::Resize { page, .. }) if page == cx.page) {
@@ -1163,6 +1311,7 @@ fn select_input(
 ) -> bool {
     let cv = &mut view.comments;
     let selected = cv.selected.filter(|(p, _)| *p == cx.page).and_then(|(_, i)| cx.get(i));
+    let group_rect = selected_group_rect(cx, cv);
     // Handles of a selected, resizable comment.
     let handle_at = |p: Pos2| -> Option<(i8, i8)> {
         let a = selected.filter(|a| cx.allowed && resizable(a))?;
@@ -1181,9 +1330,11 @@ fn select_input(
         } else if let Some(a) = cx.hit(p) {
             let movable = cx.allowed && !is_markup(&a.subtype);
             ui.ctx().set_cursor_icon(if movable { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand });
+        } else if cx.allowed && group_rect.is_some_and(|r| r.contains(p)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
         }
     }
-    if resp.drag_started()
+    if resp.drag_started_by(egui::PointerButton::Primary)
         && pressed_here
         && let Some(o) = origin
     {
@@ -1201,18 +1352,30 @@ fn select_input(
         } else if let Some(a) = cx.hit(o)
             && !is_markup(&a.subtype)
         {
-            cv.selected = Some((cx.page, a.index));
+            let in_group = cv.selected == Some((cx.page, a.index)) || cv.also.contains(&a.index);
+            if !in_group {
+                cv.selected = Some((cx.page, a.index));
+                cv.also.clear();
+            }
             cv.reveal = true;
             if cx.allowed {
-                cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
+                let move_idx = cv.selected.map_or(a.index, |(_, idx)| idx);
+                cv.gesture = Some(Gesture::Move { page: cx.page, index: move_idx, from: o });
             }
+            consumed = true;
+        } else if let Some(a) = selected
+            && cx.allowed
+            && !is_markup(&a.subtype)
+            && group_rect.is_some_and(|r| r.contains(o))
+        {
+            cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
             consumed = true;
         }
     }
     if matches!(cv.gesture, Some(Gesture::Move { page, .. } | Gesture::Resize { page, .. }) if page == cx.page) {
         consumed = true;
     }
-    if resp.drag_stopped()
+    if resp.drag_stopped_by(egui::PointerButton::Primary)
         && let Some(p) = pointer
     {
         match cv.gesture.clone() {
@@ -1221,7 +1384,22 @@ fn select_input(
                 let (a, b) = (cx.to_user(from), cx.to_user(p));
                 let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
                 if from.distance(p) >= 2.0 {
-                    view.pending_edit = Some(Edit::MoveAnnotation { page, index, dx, dy });
+                    if cv.also.is_empty() {
+                        view.pending_edit = Some(Edit::MoveAnnotation { page, index, dx, dy });
+                    } else {
+                        let mut edits: Vec<Edit> = cv
+                            .also
+                            .iter()
+                            .copied()
+                            .chain(std::iter::once(index))
+                            .map(|i| Edit::MoveAnnotation { page, index: i, dx, dy })
+                            .collect();
+                        edits.dedup_by_key(|e| match e {
+                            Edit::MoveAnnotation { index, .. } => *index,
+                            _ => usize::MAX,
+                        });
+                        view.pending_edit = Some(Edit::Batch { label: "Move".into(), edits });
+                    }
                 }
             }
             Some(Gesture::Resize { page, index, handle, from, aspect_ratio }) if page == cx.page => {
@@ -1241,7 +1419,7 @@ fn select_input(
     }
     // (egui clears the press origin on release, so clicks are located by the pointer.)
     let on_page = pointer.is_some_and(|p| cx.xf.rect.contains(p));
-    if resp.clicked() && on_page {
+    if resp.clicked_by(egui::PointerButton::Primary) && on_page {
         let follow_link = cx.tool == QuickTool::Select
             && !consumed
             && cv.gesture.is_none()
@@ -1253,13 +1431,18 @@ fn select_input(
                 // A plain click follows the link beneath text highlighting. Keep other
                 // annotations and active gestures in control of their own input.
                 cv.selected = None;
+                cv.also.clear();
             }
             Some(a) => {
                 cv.selected = Some((cx.page, a.index));
+                cv.also.clear();
                 cv.reveal = true;
                 consumed = true;
             }
-            None => cv.selected = None,
+            None => {
+                cv.selected = None;
+                cv.also.clear();
+            }
         }
     }
     if resp.double_clicked()
@@ -1268,6 +1451,7 @@ fn select_input(
         && let Some(a) = pointer.and_then(|p| cx.hit(p))
     {
         cv.selected = Some((cx.page, a.index));
+        cv.also.clear();
         cv.composer = Some(Composer {
             page: cx.page,
             at: [a.rect[2] as f64, a.rect[3] as f64],
@@ -1284,7 +1468,7 @@ fn select_input(
 /// Text asks for the replacement.
 pub(crate) fn page_after_text(resp: &egui::Response, cx: &PageCx<'_>, view: &mut DocView) {
     let QuickTool::Comment(tool) = cx.tool else { return };
-    if tool == CommentTool::ReplaceText && cx.allowed && (resp.drag_stopped() || resp.double_clicked()) {
+    if tool == CommentTool::ReplaceText && cx.allowed && (resp.drag_stopped_by(egui::PointerButton::Primary) || resp.double_clicked()) {
         if let Some((page, quads)) = view.selection_quads(cx.info).filter(|(p, _)| *p == cx.page) {
             view.clear_selection();
             let last = quads.last().copied().unwrap_or_default();
@@ -1294,7 +1478,7 @@ pub(crate) fn page_after_text(resp: &egui::Response, cx: &PageCx<'_>, view: &mut
         }
         return;
     }
-    if tool.markup().is_none() || !cx.allowed || !(resp.drag_stopped() || resp.double_clicked()) {
+    if tool.markup().is_none() || !cx.allowed || !(resp.drag_stopped_by(egui::PointerButton::Primary) || resp.double_clicked()) {
         return;
     }
     if let Some(kind) = tool.markup()
@@ -1335,6 +1519,16 @@ pub(crate) fn paint_page(ui: &egui::Ui, painter: &egui::Painter, cx: &PageCx<'_>
         && page == cx.page
         && let Some(a) = cx.get(index)
     {
+        let move_delta = match (&cv.gesture, pointer) {
+            (Some(Gesture::Move { page: gp, from, .. }), Some(p)) if *gp == cx.page => p - *from,
+            _ => egui::Vec2::ZERO,
+        };
+        for &extra_idx in &cv.also {
+            if let Some(extra) = cx.get(extra_idx) {
+                let er = cx.screen_rect(extra).translate(move_delta).expand(2.0);
+                painter.rect_stroke(er, CornerRadius::ZERO, Stroke::new(1.0, SELECT_BLUE), egui::StrokeKind::Middle);
+            }
+        }
         if is_markup(&a.subtype) && !a.quads.is_empty() {
             for r in cx.screen_rects(a) {
                 painter.rect_stroke(r.expand(2.0), CornerRadius::ZERO, Stroke::new(1.0, SELECT_BLUE), egui::StrokeKind::Middle);
@@ -1367,6 +1561,19 @@ fn paint_gesture(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
         && *page == cx.page
     {
         paint_draw(painter, cx, tool, points);
+    }
+    if let Some(Gesture::Lasso { page, points }) = &view.comments.gesture
+        && *page == cx.page
+        && points.len() >= 2
+    {
+        let pts: Vec<Pos2> = points.iter().map(|p| cx.to_screen(*p)).collect();
+        let stroke = Stroke::new(1.5, Color32::from_rgb(10, 132, 255));
+        if pts.len() >= 3
+            && let (Some(&first), Some(&last)) = (pts.first(), pts.last())
+        {
+            painter.line_segment([last, first], Stroke::new(1.0, Color32::from_rgba_unmultiplied(10, 132, 255, 110)));
+        }
+        painter.add(egui::Shape::line(pts, stroke));
     }
 }
 
@@ -1527,7 +1734,7 @@ fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
 }
 
 /// Eraser: rub out drawings along `path` (user space); one undo step for all of them.
-fn erase(cx: &PageCx<'_>, path: &[[f64; 2]]) -> Option<Edit> {
+fn erase(cx: &PageCx<'_>, path: &[[f64; 2]], live: bool) -> Option<Edit> {
     let zoom = (cx.xf.rect.width() / cx.xf.pw.max(1.0)) as f64;
     let radius = (12.0 / zoom).max(2.0);
     let b = path.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |r, p| [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])]);
@@ -1549,7 +1756,52 @@ fn erase(cx: &PageCx<'_>, path: &[[f64; 2]]) -> Option<Edit> {
         .into_iter()
         .map(|index| Edit::EraseInk { page: cx.page, index, path: path.to_vec(), radius, whole_stroke: cx.prefs.stroke_eraser })
         .collect();
-    Some(Edit::Batch { label: "Erase".into(), edits })
+    let label = if live { "EraseLive" } else { "Erase" };
+    Some(Edit::Batch { label: label.into(), edits })
+}
+
+fn comment_in_lasso(a: &Annotation, poly: &[[f64; 2]]) -> bool {
+    let r = a.rect.map(|v| v as f64);
+    let (x0, y0, x1, y1) = (r[0].min(r[2]), r[1].min(r[3]), r[0].max(r[2]), r[1].max(r[3]));
+    let (xm, ym) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    let sample_pts = [
+        [xm, ym],
+        [x0, y0],
+        [x1, y0],
+        [x1, y1],
+        [x0, y1],
+        [xm, y0],
+        [xm, y1],
+        [x0, ym],
+        [x1, ym],
+        [x0 + (x1 - x0) * 0.25, y0 + (y1 - y0) * 0.25],
+        [x0 + (x1 - x0) * 0.75, y0 + (y1 - y0) * 0.75],
+        [x0 + (x1 - x0) * 0.25, y0 + (y1 - y0) * 0.75],
+        [x0 + (x1 - x0) * 0.75, y0 + (y1 - y0) * 0.25],
+    ];
+    if sample_pts.into_iter().any(|pt| point_in_polygon(pt, poly)) {
+        return true;
+    }
+    poly.iter().any(|&[px, py]| px >= x0 && px <= x1 && py >= y0 && py <= y1)
+}
+
+fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let (x, y) = (p[0], p[1]);
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xi, yi) = (poly[i][0], poly[i][1]);
+        let (xj, yj) = (poly[j][0], poly[j][1]);
+        let intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if intersect {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 fn new_comment(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, contents: String) -> Edit {
@@ -1564,7 +1816,17 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
         // Scrolled away: keep the draft until the page is back.
         return None;
     };
-    let cx = PageCx { page, xf: &xf, info, tool: QuickTool::Select, prefs, allowed: true, hidden: false, redact_mark: ([0.89, 0.13, 0.13], 1.0) };
+    let cx = PageCx {
+        page,
+        xf: &xf,
+        info,
+        tool: QuickTool::Select,
+        prefs,
+        allowed: true,
+        hidden: false,
+        over_image: false,
+        redact_mark: ([0.89, 0.13, 0.13], 1.0),
+    };
     let anchor = cx.to_screen(c.at);
     let t = Tokens::get(ctx);
     let mut post = false;
@@ -1776,7 +2038,11 @@ pub(crate) fn page_rotation(info: &DocInfo, page: usize) -> i64 {
 
 /// Delete / Escape handling for comments (only while no text field has focus).
 pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool, allowed: bool) {
-    if !ctx.input(|i| i.pointer.any_down()) {
+    if !ctx.input(|i| {
+        i.pointer.any_down()
+            || i.pointer.button_released(egui::PointerButton::Primary)
+            || i.pointer.button_released(egui::PointerButton::Secondary)
+    }) {
         view.comments.cancelled_drag = false;
     }
     if ctx.egui_wants_keyboard_input() {
@@ -1786,7 +2052,8 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         // One step back per press: cancel the gesture, then deselect, then drop the tool.
         let cancelled = cv.gesture.take().is_some() || cv.selected.take().is_some();
-        if !cancelled && matches!(tool, QuickTool::Comment(_)) {
+        cv.also.clear();
+        if !cancelled && matches!(tool, QuickTool::Comment(_) | QuickTool::Lasso) {
             *tool = QuickTool::Select;
         }
     }
@@ -1795,7 +2062,16 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool
         && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {
         cv.selected = None;
-        view.pending_edit = Some(Edit::DeleteAnnotation { page, index });
+        if cv.also.is_empty() {
+            view.pending_edit = Some(Edit::DeleteAnnotation { page, index });
+        } else {
+            let mut indices = std::mem::take(&mut cv.also);
+            indices.push(index);
+            indices.sort_unstable_by(|a, b| b.cmp(a));
+            indices.dedup();
+            let edits = indices.into_iter().map(|i| Edit::DeleteAnnotation { page, index: i }).collect();
+            view.pending_edit = Some(Edit::Batch { label: "Delete".into(), edits });
+        }
     }
 }
 

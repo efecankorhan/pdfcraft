@@ -246,6 +246,8 @@ pub enum QuickTool {
     /// Edit ▸ Column Select: drag a rectangle to select only the text inside it (#740). The
     /// Select tool does the same while Alt/Option is held at the start of a drag.
     ColumnSelect,
+    /// Freehand / Lasso selection for handwriting notes, drawings, and comments.
+    Lasso,
 }
 
 /// A file dropped on a page grid: its name, and its bytes or, for a file on disk, the path they are
@@ -2651,6 +2653,7 @@ impl PdfCraftApp {
                 // `--quick select|hand|note|freetext|highlight|underline|strikeout|ink|line|arrow|square|circle`
                 self.quick_tool = match value {
                     "select" => QuickTool::Select,
+                    "lasso" => QuickTool::Lasso,
                     measure if measure.starts_with("measure-") => QuickTool::Measure(
                         measure_ui::Tool::from_name(measure.trim_start_matches("measure-")).ok_or_else(|| format!("unknown tool {measure}"))?,
                     ),

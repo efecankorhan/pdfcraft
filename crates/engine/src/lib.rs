@@ -3745,9 +3745,11 @@ impl Session {
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
         let scope = scope_of(&edit);
-        editor.undo.push((label, previous, previous_keys, scope));
-        if editor.undo.len() > MAX_UNDO {
-            editor.undo.remove(0);
+        if label.as_str() != "EraseLive" {
+            editor.undo.push((label, previous, previous_keys, scope));
+            if editor.undo.len() > MAX_UNDO {
+                editor.undo.remove(0);
+            }
         }
         editor.redo.clear();
         Self::adopt_keys(doc);

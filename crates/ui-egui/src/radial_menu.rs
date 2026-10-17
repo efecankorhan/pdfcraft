@@ -23,6 +23,7 @@ pub enum RadialMode {
     #[default]
     Tools,
     Colors,
+    CustomColor,
     Thickness,
     FontSize,
     Shapes,
@@ -56,12 +57,14 @@ impl Slot {
 enum SlotAction {
     Pen,
     FreehandHighlighter,
+    Lasso,
     Tool(CommentTool),
     SelectTool,
     Undo,
     Redo,
     SwitchMode(RadialMode),
     SetColor(Rgb),
+    SelectPaletteSlot(usize),
     SetWidth(f64),
     SetOpacity(f64),
     SetFontSize(f64),
@@ -98,7 +101,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
     let (start_deg, end_deg) = if flips_down {
         (15.0f32, 165.0f32)
     } else {
-        (-165.0f32, 15.0f32)
+        (-165.0f32, -15.0f32)
     };
 
     let start_rad = start_deg.to_radians();
@@ -141,46 +144,65 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                     app.quick_tool == QuickTool::Comment(CommentTool::Eraser),
                     SlotAction::Tool(CommentTool::Eraser),
                 ),
-            Slot::icon(
-                "pencil",
-                "Pen",
-                app.quick_tool == QuickTool::Comment(CommentTool::Ink) && !is_highlighter,
-                SlotAction::Pen,
-            ),
-            Slot::icon(
-                "highlighter",
-                "Highlighter",
-                app.quick_tool == QuickTool::Comment(CommentTool::Highlight)
-                    || (app.quick_tool == QuickTool::Comment(CommentTool::Ink) && is_highlighter),
-                SlotAction::FreehandHighlighter,
-            ),
-            Slot::icon(
-                "type",
-                "Text Box",
-                app.quick_tool == QuickTool::Comment(CommentTool::TextBox),
-                SlotAction::Tool(CommentTool::TextBox),
-            ),
-            Slot::icon("square", "Shapes…", false, SlotAction::SwitchMode(RadialMode::Shapes)),
-            Slot::swatch(current_style.color, "Colors…", false, SlotAction::SwitchMode(RadialMode::Colors)),
-            Slot::icon(
-                if text_mode { "type" } else { "sliders-horizontal" },
-                if text_mode { "Font Size (Punto)…" } else { "Size & Opacity…" },
-                false,
-                SlotAction::SwitchMode(if text_mode { RadialMode::FontSize } else { RadialMode::Thickness }),
-            ),
-            Slot::icon("ellipsis", "More…", false, SlotAction::SwitchMode(RadialMode::More)),
-        ]},
-        RadialMode::Colors => vec![
-            Slot::icon("chevron-left", "Back", false, SlotAction::SwitchMode(RadialMode::Tools)),
-            Slot::swatch([0.0, 0.0, 0.0], "Black", comments::same_colour(&current_style.color, &[0.0, 0.0, 0.0]), SlotAction::SetColor([0.0, 0.0, 0.0])),
-            Slot::swatch([0.0, 0.47, 0.84], "Blue", comments::same_colour(&current_style.color, &[0.0, 0.47, 0.84]), SlotAction::SetColor([0.0, 0.47, 0.84])),
-            Slot::swatch([0.36, 0.75, 0.98], "Cyan", comments::same_colour(&current_style.color, &[0.36, 0.75, 0.98]), SlotAction::SetColor([0.36, 0.75, 0.98])),
-            Slot::swatch([0.18, 0.62, 0.36], "Green", comments::same_colour(&current_style.color, &[0.18, 0.62, 0.36]), SlotAction::SetColor([0.18, 0.62, 0.36])),
-            Slot::swatch([1.0, 0.94, 0.0], "Yellow", comments::same_colour(&current_style.color, &[1.0, 0.94, 0.0]), SlotAction::SetColor([1.0, 0.94, 0.0])),
-            Slot::swatch([1.0, 0.54, 0.0], "Orange", comments::same_colour(&current_style.color, &[1.0, 0.54, 0.0]), SlotAction::SetColor([1.0, 0.54, 0.0])),
-            Slot::swatch([0.89, 0.13, 0.13], "Red", comments::same_colour(&current_style.color, &[0.89, 0.13, 0.13]), SlotAction::SetColor([0.89, 0.13, 0.13])),
-            Slot::swatch([0.54, 0.25, 0.82], "Purple", comments::same_colour(&current_style.color, &[0.54, 0.25, 0.82]), SlotAction::SetColor([0.54, 0.25, 0.82])),
-        ],
+                Slot::icon(
+                    "pencil",
+                    "Pen",
+                    app.quick_tool == QuickTool::Comment(CommentTool::Ink) && !is_highlighter,
+                    SlotAction::Pen,
+                ),
+                Slot::icon(
+                    "highlighter",
+                    "Highlighter",
+                    app.quick_tool == QuickTool::Comment(CommentTool::Highlight)
+                        || (app.quick_tool == QuickTool::Comment(CommentTool::Ink) && is_highlighter),
+                    SlotAction::FreehandHighlighter,
+                ),
+                Slot::icon(
+                    "lasso",
+                    "Lasso Select",
+                    app.quick_tool == QuickTool::Lasso,
+                    SlotAction::Lasso,
+                ),
+                Slot::icon(
+                    "type",
+                    "Text Box",
+                    app.quick_tool == QuickTool::Comment(CommentTool::TextBox),
+                    SlotAction::Tool(CommentTool::TextBox),
+                ),
+                Slot::icon("square", "Shapes…", false, SlotAction::SwitchMode(RadialMode::Shapes)),
+                Slot::swatch(current_style.color, "Colors…", false, SlotAction::SwitchMode(RadialMode::Colors)),
+                Slot::icon(
+                    if text_mode { "type" } else { "sliders-horizontal" },
+                    if text_mode { "Font size" } else { "Size & Opacity…" },
+                    false,
+                    SlotAction::SwitchMode(if text_mode { RadialMode::FontSize } else { RadialMode::Thickness }),
+                ),
+                Slot::icon("ellipsis", "More…", false, SlotAction::SwitchMode(RadialMode::More)),
+            ]
+        }
+        RadialMode::Colors => {
+            let mut color_slots = vec![
+                Slot::icon("chevron-left", "Back", false, SlotAction::SwitchMode(RadialMode::Tools)),
+            ];
+            for &c in &app.comment_prefs.radial_palette {
+                let name = comments::SWATCHES.iter().find(|(_, s)| comments::same_colour(s, &c)).map(|(n, _)| *n).unwrap_or("Custom colour");
+                let is_on = comments::same_colour(&current_style.color, &c);
+                color_slots.push(Slot::swatch(c, name, is_on, SlotAction::SetColor(c)));
+            }
+            color_slots.push(Slot::icon("palette", "Palette & Custom…", false, SlotAction::SwitchMode(RadialMode::CustomColor)));
+            color_slots
+        }
+        RadialMode::CustomColor => {
+            let mut color_slots = vec![
+                Slot::icon("chevron-left", "Back", false, SlotAction::SwitchMode(RadialMode::Colors)),
+            ];
+            let selected_slot = app.comment_prefs.selected_palette_slot.min(app.comment_prefs.radial_palette.len() - 1);
+            for (i, &c) in app.comment_prefs.radial_palette.iter().enumerate() {
+                let name = comments::SWATCHES.iter().find(|(_, s)| comments::same_colour(s, &c)).map(|(n, _)| *n).unwrap_or("Custom colour");
+                color_slots.push(Slot::swatch(c, name, i == selected_slot, SlotAction::SelectPaletteSlot(i)));
+            }
+            color_slots
+        }
         RadialMode::Thickness => vec![
             Slot::icon("chevron-left", "Back", false, SlotAction::SwitchMode(RadialMode::Tools)),
             Slot::dot(2.5, current_style.color, 1.0, "Fine (1.5 pt)", (current_style.width - 1.5).abs() < 0.5, SlotAction::SetWidth(1.5)),
@@ -190,7 +212,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             Slot::dot(6.5, current_style.color, 1.0, "Opaque (100%)", current_style.opacity >= 0.9, SlotAction::SetOpacity(1.0)),
             Slot::dot(6.5, current_style.color, 0.7, "Semi-Transparent (70%)", (current_style.opacity - 0.7).abs() < 0.15, SlotAction::SetOpacity(0.7)),
             Slot::dot(6.5, current_style.color, 0.4, "Highlighter (40%)", current_style.opacity <= 0.5, SlotAction::SetOpacity(0.4)),
-            Slot::icon("type", "Font Size (Punto)…", false, SlotAction::SwitchMode(RadialMode::FontSize)),
+            Slot::icon("type", "Font size", false, SlotAction::SwitchMode(RadialMode::FontSize)),
         ],
         RadialMode::FontSize => {
             let cur = app.comment_prefs.text_box_font_size;
@@ -219,7 +241,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             Slot::icon("mouse-pointer", "Select Tool", app.quick_tool == QuickTool::Select, SlotAction::SelectTool),
             Slot::icon("message-square-plus", "Sticky Note", app.quick_tool == QuickTool::Comment(CommentTool::Note), SlotAction::Tool(CommentTool::Note)),
             Slot::icon("message-square-quote", "Callout", app.quick_tool == QuickTool::Comment(CommentTool::Callout), SlotAction::Tool(CommentTool::Callout)),
-            Slot::icon("type", "Font Size (Punto)…", false, SlotAction::SwitchMode(RadialMode::FontSize)),
+            Slot::icon("type", "Font size", false, SlotAction::SwitchMode(RadialMode::FontSize)),
             Slot::icon("highlighter", "Text Highlight", app.quick_tool == QuickTool::Comment(CommentTool::Highlight), SlotAction::Tool(CommentTool::Highlight)),
             Slot::icon("underline", "Underline", app.quick_tool == QuickTool::Comment(CommentTool::Underline), SlotAction::Tool(CommentTool::Underline)),
             Slot::icon("strikethrough", "Strikethrough", app.quick_tool == QuickTool::Comment(CommentTool::StrikeOut), SlotAction::Tool(CommentTool::StrikeOut)),
@@ -231,6 +253,64 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             ),
         ],
     };
+
+    let now = ui.input(|i| i.time);
+    let mut picker_rect: Option<Rect> = None;
+    let mut picked_custom = false;
+
+    if menu.mode == RadialMode::CustomColor {
+        let place_below = flips_down || (center.y - r_out - 320.0 < avail.top());
+        let (pivot, picker_pos) = if place_below {
+            (egui::Align2::CENTER_TOP, center + vec2(0.0, if flips_down { r_out + 14.0 } else { 24.0 }))
+        } else {
+            (egui::Align2::CENTER_BOTTOM, center - vec2(0.0, r_out + 14.0))
+        };
+        let slot_idx = app.comment_prefs.selected_palette_slot.min(app.comment_prefs.radial_palette.len() - 1);
+        let slot_color = app.comment_prefs.radial_palette[slot_idx];
+        let area_resp = egui::Area::new(egui::Id::new(("radial-color-picker-card", view_id)))
+            .order(egui::Order::Tooltip)
+            .pivot(pivot)
+            .fixed_pos(picker_pos)
+            .constrain_to(avail)
+            .show(ui.ctx(), |ui| {
+                *ui.visuals_mut() = egui::Visuals::dark();
+                egui::Frame::popup(ui.style())
+                    .corner_radius(12)
+                    .fill(Color32::from_rgb(26, 26, 28))
+                    .stroke(Stroke::new(1.0, Color32::from_white_alpha(50)))
+                    .inner_margin(10.0)
+                    .show(ui, |ui| {
+                        ui.set_max_width(220.0);
+                        ui.label(
+                            egui::RichText::new(tl!("Change palette colour"))
+                                .font(crate::theme::semibold(12.0))
+                                .color(Color32::WHITE),
+                        );
+                        ui.add_space(4.0);
+                        if let Some(c) = comments::swatch_grid(ui, Some(slot_color)) {
+                            app.comment_prefs.update_radial_palette(c);
+                            app.comment_prefs.set_color(style_tool, c);
+                            if !matches!(app.quick_tool, QuickTool::Comment(t) if t != CommentTool::Eraser) {
+                                app.quick_tool = QuickTool::Comment(style_tool);
+                            }
+                            apply_style_to_selected(app, style_tool);
+                            if let Some(v) = app.views.get_mut(view_index) {
+                                v.comments.cancelled_drag = true;
+                                if let Some(r) = v.comments.radial_menu.as_mut() {
+                                    r.mode = RadialMode::Colors;
+                                    r.opened_at = now;
+                                }
+                            }
+                            picked_custom = true;
+                        }
+                    });
+            });
+        picker_rect = Some(area_resp.response.rect);
+    }
+
+    if picked_custom {
+        return;
+    }
 
     egui::Area::new(egui::Id::new(("radial-menu-area", view_id)))
         .order(egui::Order::Foreground)
@@ -330,6 +410,13 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             // 2. Slots & Buttons Along the Arc (single-nearest-slot hit test so neighbors never overlap)
             let num_slots = slots.len();
             let pointer = ui.input(|inp| inp.pointer.latest_pos().or_else(|| inp.pointer.hover_pos()));
+            let press_origin = ui.input(|inp| inp.pointer.press_origin());
+            let over_picker = picker_rect.is_some_and(|r| {
+                let expanded = r.expand(6.0);
+                pointer.is_some_and(|p| expanded.contains(p))
+                    || press_origin.is_some_and(|o| expanded.contains(o))
+                    || ui.ctx().egui_is_using_pointer()
+            });
             let btn_radius = 15.0 * scale;
 
             let slot_positions: Vec<Pos2> = (0..num_slots)
@@ -340,23 +427,27 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 })
                 .collect();
 
-            let hovered_idx = pointer.and_then(|p| {
-                let d_center = p.distance(center);
-                if d_center < r_in - 12.0 || d_center > r_out + 12.0 {
-                    return None;
-                }
-                slot_positions
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, pos)| (idx, p.distance(*pos)))
-                    .filter(|(_, dist)| *dist <= half_thick + 4.0)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(idx, _)| idx)
-            });
+            let hovered_idx = if over_picker {
+                None
+            } else {
+                pointer.and_then(|p| {
+                    let d_center = p.distance(center);
+                    if d_center < r_in - 12.0 || d_center > r_out + 12.0 {
+                        return None;
+                    }
+                    slot_positions
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, pos)| (idx, p.distance(*pos)))
+                        .filter(|(_, dist)| *dist <= half_thick + 4.0)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(idx, _)| idx)
+                })
+            };
 
-            let now = ui.input(|i| i.time);
-            let ready = now - menu.opened_at > 0.08;
+            let ready = now > menu.opened_at;
             let clicked = ready
+                && !over_picker
                 && ui.input(|inp| {
                     inp.pointer.primary_clicked() || inp.pointer.button_released(egui::PointerButton::Primary)
                 });
@@ -392,9 +483,11 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             }
 
             // Show hovered label above/below the arc
-            if let Some(label) = hovered_label {
+            if let Some(label) = hovered_label
+                && menu.mode != RadialMode::CustomColor
+            {
                 let label_pos = center + vec2(0.0, if flips_down { r_out + 18.0 } else { -(r_out + 18.0) });
-                let galley = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), crate::theme::semibold(11.5), Color32::WHITE));
+                let galley = ui.fonts_mut(|f| f.layout_no_wrap(tl!(label).to_string(), crate::theme::semibold(11.5), Color32::WHITE));
                 let badge_rect = Rect::from_center_size(label_pos, galley.size() + vec2(14.0, 8.0));
                 painter.rect_filled(badge_rect, egui::CornerRadius::same(10), Color32::from_rgba_unmultiplied(26, 26, 28, (245.0 * t) as u8));
                 painter.rect_stroke(badge_rect, egui::CornerRadius::same(10), Stroke::new(1.0, border_color), egui::StrokeKind::Outside);
@@ -403,6 +496,9 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
 
             // 3. Handle Click / Dismissal
             if let Some(idx) = triggered_action {
+                if let Some(v) = app.views.get_mut(view_index) {
+                    v.comments.cancelled_drag = true;
+                }
                 if let Some(slot) = slots.get(idx) {
                     match slot.action {
                         SlotAction::Pen => {
@@ -417,6 +513,12 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                             app.comment_prefs.activate_freehand_highlighter();
                             app.quick_tool = QuickTool::Comment(CommentTool::Ink);
                             app.comment_prefs.group_tool[CommentTool::Ink.group()] = CommentTool::Ink;
+                            if let Some(v) = app.views.get_mut(view_index) {
+                                v.comments.radial_menu = None;
+                            }
+                        }
+                        SlotAction::Lasso => {
+                            app.quick_tool = QuickTool::Lasso;
                             if let Some(v) = app.views.get_mut(view_index) {
                                 v.comments.radial_menu = None;
                             }
@@ -445,6 +547,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                                 && let Some(r) = v.comments.radial_menu.as_mut()
                             {
                                 r.mode = new_mode;
+                                r.opened_at = now;
                             }
                         }
                         SlotAction::SetColor(color) => {
@@ -455,6 +558,16 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                             apply_style_to_selected(app, style_tool);
                             if let Some(v) = app.views.get_mut(view_index) {
                                 v.comments.radial_menu = None;
+                            }
+                        }
+                        SlotAction::SelectPaletteSlot(slot_idx) => {
+                            app.comment_prefs.selected_palette_slot = slot_idx.min(app.comment_prefs.radial_palette.len() - 1);
+                            let c = app.comment_prefs.radial_palette[app.comment_prefs.selected_palette_slot];
+                            app.comment_prefs.set_color(style_tool, c);
+                            if let Some(v) = app.views.get_mut(view_index)
+                                && let Some(r) = v.comments.radial_menu.as_mut()
+                            {
+                                r.opened_at = now;
                             }
                         }
                         SlotAction::SetWidth(w) => {
@@ -503,16 +616,26 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                     }
                 }
             } else {
-                // Dismiss on second right-click, any primary click/press outside a slot, or Escape key
+                // Dismiss on second right-click, primary click outside the outer ring & picker card, or Escape key
                 let escape = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
-                let secondary_close = ready && ui.input(|inp| inp.pointer.secondary_clicked());
+                let secondary_close = ready
+                    && ui.input(|inp| {
+                        inp.pointer.secondary_clicked()
+                            || inp.pointer.button_released(egui::PointerButton::Secondary)
+                    });
                 let primary_outside = ready
+                    && !over_picker
                     && hovered_idx.is_none()
-                    && ui.input(|inp| inp.pointer.primary_pressed() || inp.pointer.primary_clicked());
+                    && pointer.is_some_and(|p| p.distance(center) > r_out + 18.0)
+                    && ui.input(|inp| {
+                        inp.pointer.primary_clicked()
+                            || inp.pointer.button_released(egui::PointerButton::Primary)
+                    });
 
                 if (escape || secondary_close || primary_outside)
                     && let Some(v) = app.views.get_mut(view_index)
                 {
+                    v.comments.cancelled_drag = true;
                     v.comments.radial_menu = None;
                 }
             }
@@ -522,16 +645,39 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
 fn apply_style_to_selected(app: &mut PdfCraftApp, tool: CommentTool) {
     let style = app.comment_prefs.style(tool);
     if let Some((index, id)) = app.active_ids()
-        && let Some((page, annotation)) = app.views.get(index).and_then(|view| view.comments.selected)
+        && let Some(view) = app.views.get(index)
+        && let Some((page, annotation)) = view.comments.selected
         && app.session.get(id).is_some_and(|doc| doc.allows_annotation())
     {
-        app.apply_edit(pdfcraft_engine::Edit::StyleAnnotation {
-            page,
-            index: annotation,
-            color: Some(style.color),
-            opacity: Some(style.opacity),
-            width: tool.has_width().then_some(style.width),
-            endings: None,
-        });
+        let also = view.comments.also.clone();
+        if also.is_empty() {
+            app.apply_edit(pdfcraft_engine::Edit::StyleAnnotation {
+                page,
+                index: annotation,
+                color: Some(style.color),
+                opacity: Some(style.opacity),
+                width: tool.has_width().then_some(style.width),
+                endings: None,
+            });
+        } else {
+            let mut edits: Vec<pdfcraft_engine::Edit> = also
+                .into_iter()
+                .chain(std::iter::once(annotation))
+                .map(|i| pdfcraft_engine::Edit::StyleAnnotation {
+                    page,
+                    index: i,
+                    color: Some(style.color),
+                    opacity: Some(style.opacity),
+                    width: tool.has_width().then_some(style.width),
+                    endings: None,
+                })
+                .collect();
+            edits.dedup_by_key(|e| match e {
+                pdfcraft_engine::Edit::StyleAnnotation { index, .. } => *index,
+                _ => usize::MAX,
+            });
+            app.apply_edit(pdfcraft_engine::Edit::Batch { label: "Style".into(), edits });
+        }
     }
 }
+

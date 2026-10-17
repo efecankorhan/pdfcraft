@@ -2603,6 +2603,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         | QuickTool::Link
         | QuickTool::SignArea { .. }
         | QuickTool::MarqueeZoom
+        | QuickTool::Lasso
         | QuickTool::Snapshot => false,
     };
     let prefs = &app.comment_prefs;
@@ -2731,7 +2732,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         // gone to earlier that still shows whole beside it.
         let pressed = unobstructed && ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(avail);
         let mut pressed_page = None;
-        if resp.secondary_clicked() {
+        let radial_was_open = view.comments.radial_menu.is_some();
+        if !radial_was_open && resp.secondary_clicked() {
             // Set again below when the right-click lands on a link.
             view.links.context = None;
         }
@@ -2887,7 +2889,15 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(0.5, t.border.gamma_multiply(0.8)), egui::StrokeKind::Outside);
 
             // Comments: tools, selection, moving and resizing come before text selection.
-            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, redact_mark };
+            let over_image = !radial_was_open
+                && tool == QuickTool::Select
+                && resp.secondary_clicked()
+                && pointer.filter(|p| xf.rect.contains(*p)).is_some_and(|p| {
+                    let (vx, vy) = xf.screen_to_view(p);
+                    let u = info.pages[i].view_to_user(vx, vy);
+                    doc.page_image_at(i, [u[0] as f64, u[1] as f64]).is_some()
+                });
+            let pcx = comments::PageCx { page: i, xf: &xf, info, tool, prefs, allowed, hidden: comments_hidden, over_image, redact_mark };
             if let QuickTool::Measure(measure_tool) = tool {
                 crate::measure_ui::page_input(ui, &resp, doc, view, &pcx, measure_tool, units);
             }
@@ -3091,7 +3101,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 !others_own_pointer && (text_used || image_used)
             };
             let on_link = tool == QuickTool::Link && can_modify && crate::link_ui::page_input(ui, &resp, &xf, i, info, &doc_links, view);
-            if tool == QuickTool::Select
+            if !radial_was_open
+                && tool == QuickTool::Select
                 && resp.secondary_clicked()
                 && can_modify
                 && let Some(p) = pointer.filter(|p| xf.rect.contains(*p))
@@ -3099,10 +3110,17 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             {
                 view.links.context = Some((i, l.index));
             }
-            let consumed = on_objects || on_edit_text || on_link || on_content || boxing || on_field || comments::page_input(ui, &resp, &pcx, view);
+            let consumed = radial_was_open
+                || on_objects
+                || on_edit_text
+                || on_link
+                || on_content
+                || boxing
+                || on_field
+                || comments::page_input(ui, &resp, &pcx, view);
 
             let preview_target =
-                (matches!(tool, QuickTool::Select | QuickTool::Fill(_)) && !comments_hidden).then_some(view.comments.selected).flatten();
+                (matches!(tool, QuickTool::Select | QuickTool::Lasso | QuickTool::Fill(_)) && !comments_hidden).then_some(view.comments.selected).flatten();
             view.signature_drag.prepare(ui.ctx(), doc, preview_target, scale);
             view.signature_drag.paint(painter, &pcx, &view.comments, view.pending_edit.as_ref());
 
@@ -3191,7 +3209,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                             }
                         }
                     }
-                    if resp.drag_started() && press_here && !over_link {
+                    if resp.drag_started_by(egui::PointerButton::Primary) && press_here && !over_link {
                         view.selection_drag = true;
                         let origin = ui.input(|inp| inp.pointer.press_origin()).unwrap_or(p);
                         let (ox, oy) = xf.screen_to_view(origin);
@@ -3352,7 +3370,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 // Annotation hover shows the comment, as Acrobat's popups do; not while drawing
                 // freehand, where it would cover the next stroke (#429).
-                let freehand = matches!(tool, QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser));
+                let freehand = matches!(tool, QuickTool::Lasso | QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser));
                 let gesturing = view.comments.gesture.is_some() || freehand;
                 for a in info.annotations.iter().filter(|a| a.page == i && !gesturing) {
                     let sr = xf.user_rect(info, i, a.rect);
@@ -3466,7 +3484,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         if view.continuous {
             view.current = current;
         }
-        if view.comments.radial_menu.is_none() {
+        if !radial_was_open && view.comments.radial_menu.is_none() {
             resp.context_menu(|ui| {
                 // Preparing a form: the selected field's menu.
                 if preparing && let Some((name, wi)) = view.prepare.selected.clone() {

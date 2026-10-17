@@ -2067,6 +2067,7 @@ unsafe fn public_window_callback_inner(
                         continue;
                     }
 
+                    let mut pen_flags = 0u32;
                     let force = match pointer_info.pointerType {
                         PT_TOUCH => {
                             let mut touch_info = mem::MaybeUninit::uninit();
@@ -2091,9 +2092,11 @@ unsafe fn public_window_callback_inner(
                                     GetPointerPenInfo(pointer_info.pointerId, pen_info.as_mut_ptr())
                                 } {
                                     0 => None,
-                                    _ => normalize_pointer_pressure(unsafe {
-                                        pen_info.assume_init().pressure
-                                    }),
+                                    _ => {
+                                        let info = unsafe { pen_info.assume_init() };
+                                        pen_flags = info.penFlags;
+                                        normalize_pointer_pressure(info.pressure)
+                                    },
                                 }
                             })
                         },
@@ -2103,6 +2106,115 @@ unsafe fn public_window_callback_inner(
                     let x = location.x as f64 + x.fract();
                     let y = location.y as f64 + y.fract();
                     let location = PhysicalPosition::new(x, y);
+
+                    if pointer_info.pointerType == PT_PEN {
+                        use std::sync::atomic::{AtomicBool, Ordering};
+                        const PEN_FLAG_BARREL: u32 = 0x0000_0001;
+                        const POINTER_FLAG_INCONTACT: u32 = 0x0000_0004;
+                        const POINTER_FLAG_SECONDBUTTON: u32 = 0x0000_0020;
+                        const POINTER_CHANGE_SECONDBUTTON_DOWN: i32 = 3;
+                        const POINTER_CHANGE_SECONDBUTTON_UP: i32 = 4;
+
+                        static PEN_TIP_DOWN: AtomicBool = AtomicBool::new(false);
+                        static PEN_BARREL_DOWN: AtomicBool = AtomicBool::new(false);
+                        static PEN_SUPPRESS_TIP: AtomicBool = AtomicBool::new(false);
+
+                        {
+                            let mut w = userdata.window_state_lock();
+                            w.mouse.last_position = Some(location);
+                        }
+                        userdata.send_event(Event::WindowEvent {
+                            window_id: RootWindowId(WindowId(window)),
+                            event: WindowEvent::CursorMoved {
+                                device_id: DEVICE_ID,
+                                position: location,
+                            },
+                        });
+
+                        let is_down = util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_DOWN);
+                        let is_up = util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_UP);
+                        let in_contact =
+                            util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_INCONTACT)
+                                && !is_up;
+                        let btn_change = pointer_info.ButtonChangeType;
+                        let barrel = (util::has_flag(pen_flags, PEN_FLAG_BARREL)
+                            || util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_SECONDBUTTON)
+                            || btn_change == POINTER_CHANGE_SECONDBUTTON_DOWN)
+                            && btn_change != POINTER_CHANGE_SECONDBUTTON_UP;
+
+                        if !in_contact && !barrel {
+                            PEN_SUPPRESS_TIP.store(false, Ordering::Relaxed);
+                        }
+
+                        if barrel {
+                            PEN_SUPPRESS_TIP.store(true, Ordering::Relaxed);
+                            if !PEN_BARREL_DOWN.swap(true, Ordering::Relaxed) {
+                                userdata.send_event(Event::WindowEvent {
+                                    window_id: RootWindowId(WindowId(window)),
+                                    event: WindowEvent::MouseInput {
+                                        device_id: DEVICE_ID,
+                                        state: crate::event::ElementState::Pressed,
+                                        button: crate::event::MouseButton::Right,
+                                    },
+                                });
+                            }
+                            if PEN_TIP_DOWN.swap(false, Ordering::Relaxed) {
+                                userdata.send_event(Event::WindowEvent {
+                                    window_id: RootWindowId(WindowId(window)),
+                                    event: WindowEvent::MouseInput {
+                                        device_id: DEVICE_ID,
+                                        state: crate::event::ElementState::Released,
+                                        button: crate::event::MouseButton::Left,
+                                    },
+                                });
+                            }
+                            if is_up && PEN_BARREL_DOWN.swap(false, Ordering::Relaxed) {
+                                userdata.send_event(Event::WindowEvent {
+                                    window_id: RootWindowId(WindowId(window)),
+                                    event: WindowEvent::MouseInput {
+                                        device_id: DEVICE_ID,
+                                        state: crate::event::ElementState::Released,
+                                        button: crate::event::MouseButton::Right,
+                                    },
+                                });
+                            }
+                            continue;
+                        } else if PEN_BARREL_DOWN.swap(false, Ordering::Relaxed) {
+                            userdata.send_event(Event::WindowEvent {
+                                window_id: RootWindowId(WindowId(window)),
+                                event: WindowEvent::MouseInput {
+                                    device_id: DEVICE_ID,
+                                    state: crate::event::ElementState::Released,
+                                    button: crate::event::MouseButton::Right,
+                                },
+                            });
+                            continue;
+                        }
+
+                        if !PEN_SUPPRESS_TIP.load(Ordering::Relaxed) && (in_contact || is_down) {
+                            if !PEN_TIP_DOWN.swap(true, Ordering::Relaxed) {
+                                userdata.send_event(Event::WindowEvent {
+                                    window_id: RootWindowId(WindowId(window)),
+                                    event: WindowEvent::MouseInput {
+                                        device_id: DEVICE_ID,
+                                        state: crate::event::ElementState::Pressed,
+                                        button: crate::event::MouseButton::Left,
+                                    },
+                                });
+                            }
+                        } else if PEN_TIP_DOWN.swap(false, Ordering::Relaxed) {
+                            userdata.send_event(Event::WindowEvent {
+                                window_id: RootWindowId(WindowId(window)),
+                                event: WindowEvent::MouseInput {
+                                    device_id: DEVICE_ID,
+                                    state: crate::event::ElementState::Released,
+                                    button: crate::event::MouseButton::Left,
+                                },
+                            });
+                        }
+                        continue;
+                    }
+
                     userdata.send_event(Event::WindowEvent {
                         window_id: RootWindowId(WindowId(window)),
                         event: WindowEvent::Touch(Touch {

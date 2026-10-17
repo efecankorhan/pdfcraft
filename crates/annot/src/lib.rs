@@ -2369,14 +2369,14 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
     let (min_x, min_y, max_x, max_y) = (path_b[0], path_b[1], path_b[2], path_b[3]);
     let mut kept: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut erased = false;
-    if whole_stroke {
-        for s in &strokes {
-            let in_bounds = bounds(s.iter().copied())
-                .is_some_and(|b| b[0] <= max_x + radius && b[2] >= min_x - radius && b[1] <= max_y + radius && b[3] >= min_y - radius);
-            if !in_bounds {
-                kept.push(s.clone());
-                continue;
-            }
+    for s in &strokes {
+        let in_bounds = bounds(s.iter().copied())
+            .is_some_and(|b| b[0] <= max_x + radius && b[2] >= min_x - radius && b[1] <= max_y + radius && b[3] >= min_y - radius);
+        if !in_bounds {
+            kept.push(s.clone());
+            continue;
+        }
+        if whole_stroke {
             let hit = s.windows(2).any(|w| {
                 let n = ((w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) / (radius / 2.0)).ceil().clamp(1.0, 2000.0) as usize;
                 (0..=n).any(|k| {
@@ -2390,15 +2390,7 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
             } else {
                 kept.push(s.clone());
             }
-        }
-    } else {
-        for s in &strokes {
-            let in_bounds = bounds(s.iter().copied())
-                .is_some_and(|b| b[0] <= max_x + radius && b[2] >= min_x - radius && b[1] <= max_y + radius && b[3] >= min_y - radius);
-            if !in_bounds {
-                kept.push(s.clone());
-                continue;
-            }
+        } else {
             // Densify so long segments are cut where the eraser crosses them.
             let mut pts: Vec<[f64; 2]> = Vec::new();
             for w in s.windows(2) {
