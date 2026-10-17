@@ -1904,11 +1904,15 @@ impl DocView {
     /// Width of the scroll content. Single-page view sizes it to the page it shows, so a
     /// wider page elsewhere in the document can't push the shown one off-centre.
     fn content_width(&self, info: &DocInfo, avail_w: f32) -> f32 {
+        if matches!(self.fit, Fit::Width | Fit::Page) {
+            return avail_w;
+        }
         let single = (self.layout == PageLayout::Single && !self.continuous).then(|| self.current.min(info.pages.len().saturating_sub(1)));
         let shown = info.pages.iter().enumerate().filter(|&(i, _)| single.is_none_or(|c| c == i));
         let max_w = shown.map(|(_, p)| self.display_size(p).0).fold(0.0, f32::max);
         let per_row = if self.layout == PageLayout::TwoUp { 2.0 } else { 1.0 };
-        (max_w * self.zoom * PT * per_row + 2.0 * SIDE).max(avail_w)
+        let w = max_w * self.zoom * PT * per_row + 2.0 * SIDE;
+        if w <= avail_w + 0.5 { avail_w } else { w }
     }
 
     /// Page rects in content coordinates (origin at the scroll content's top-left).
@@ -2391,7 +2395,13 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
 
     // Drawing a comment: the pointer in a band along any edge (or just past it) scrolls the view
     // that way, so a point beyond what is shown can be reached without letting go of the tool.
-    let edge_delta = if unobstructed && matches!(view.comments.gesture, Some(comments::Gesture::Draw { .. })) {
+    // Freehand ink and eraser strokes stay anchored on the page under the pen instead of scrolling
+    // the canvas and waking the scrollbars while writing near the margin.
+    let edge_delta = if unobstructed
+        && matches!(
+            view.comments.gesture,
+            Some(comments::Gesture::Draw { tool, .. }) if !matches!(tool, comments::CommentTool::Ink | comments::CommentTool::Eraser)
+        ) {
         let (pointer, dt) = ui.input(|i| (if i.pointer.any_down() { i.pointer.latest_pos() } else { i.pointer.hover_pos() }, i.stable_dt));
         crate::autoscroll::edge_scroll(pointer, avail, dt)
     } else {
@@ -2531,8 +2541,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         }
     };
 
+    let freehand_tool = matches!(
+        app.quick_tool,
+        QuickTool::Lasso | QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser)
+    ) || view.comments.gesture.is_some();
     let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource {
-        drag: if middle_gesture {
+        drag: if middle_gesture || freehand_tool {
             egui::scroll_area::DragScroll::Never
         } else if app.quick_tool == QuickTool::Hand {
             egui::scroll_area::DragScroll::Always
@@ -2801,7 +2815,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 }
                 match view.pages.get(&i) {
                     Some(p) => {
-                        if !tiled && p.tag == want_tag {
+                        let expected_px = [device_pixels(pw_pt, want_scale) as usize, device_pixels(ph_pt, want_scale) as usize];
+                        if !tiled && (p.tag == want_tag || p.tex.size() == expected_px) {
                             xf.texel_aligned(p.tex.size(), ppp).paint_image(painter, p.tex.id(), 0.0, 0.0, 1.0, 1.0);
                         } else {
                             // A backdrop, or a raster at an older scale until the new one arrives.

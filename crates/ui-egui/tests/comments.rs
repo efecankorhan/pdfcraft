@@ -1657,6 +1657,23 @@ fn radial_menu_tablet_handwriting_palette() {
     assert!(h.state().views[0].comments.radial_menu.is_none(), "second right-click closes radial menu");
     assert!(h.query_by_label("Add a sticky note here").is_none(), "rectangular context menu must not open on second right-click");
     assert!(h.query_by_label("Comments panel").is_none(), "rectangular context menu must not open on second right-click");
+
+    // Drawing with Ink near the viewport edge must not auto-scroll or jitter the page position
+    h.state_mut().set_option("quick", "ink").unwrap();
+    h.run_steps(2);
+    let page_before = h.state().views[0].page_screen_rect(0).expect("page rect");
+    let vp = h.state().views[0].viewport_rect();
+    let near_edge_start = egui::pos2(page_before.center().x, vp.bottom() - 8.0);
+    let near_edge_end = egui::pos2(page_before.center().x + 40.0, vp.bottom() - 6.0);
+    h.event(egui::Event::PointerMoved(near_edge_start));
+    h.event(egui::Event::PointerButton { pos: near_edge_start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::PointerMoved(near_edge_end));
+    h.run_steps(3);
+    h.event(egui::Event::PointerButton { pos: near_edge_end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    let page_after = h.state().views[0].page_screen_rect(0).expect("page rect");
+    assert_eq!(page_before, page_after, "page screen rect must stay still while writing with Ink near the viewport edge");
 }
 
 
