@@ -30,6 +30,18 @@ const GRID_TAG: u64 = 1 << 61;
 const GRAYSCALE_TAG: u64 = 1 << 60;
 /// The tag of a raster that is out of date (shown until its replacement arrives).
 const STALE_TAG: u64 = u64::MAX;
+/// How long a zoom step eases to its zoom.
+const ZOOM_ANIM_SECS: f64 = 0.18;
+
+/// A zoom step on its way: from one zoom to another, starting at an egui time (set by its first
+/// frame).
+#[derive(Clone, Copy, Debug)]
+struct ZoomAnim {
+    from: f32,
+    to: f32,
+    start: Option<f64>,
+}
+
 /// Pages whose raster would exceed this many device pixels on a side are drawn in tiles.
 pub(crate) const TILE_THRESHOLD: f32 = 4096.0;
 /// Base device-pixel side of a page tile. The actual side grows with the zoom
@@ -578,6 +590,8 @@ pub struct DocView {
     /// Side-by-side compare: scroll to here this frame, following the other half.
     pub(crate) sync_scroll: Option<Vec2>,
     pan_hold_until: f64,
+    /// A zoom step easing to its zoom (Ctrl/⌘ +/−, the zoom buttons), when animations are on.
+    zoom_anim: Option<ZoomAnim>,
     /// Pages whose raster proved slow (see `SLOW_MILLIS`): only these get the zoom/pan
     /// settle holds. Fast pages render straight through, with no added latency.
     slow_pages: HashSet<usize>,
@@ -771,6 +785,7 @@ impl DocView {
             last_scroll: Vec2::ZERO,
             sync_scroll: None,
             pan_hold_until: 0.0,
+            zoom_anim: None,
             slow_pages: HashSet::new(),
             comments: Default::default(),
             measure: Default::default(),
@@ -1473,6 +1488,7 @@ impl DocView {
 
     /// Zoom keeping the centre of the view still.
     pub fn set_zoom(&mut self, zoom: f32) {
+        self.zoom_anim = None;
         // CLI/view options can set zoom before the first layout. Rect::NOTHING has no
         // finite centre yet, but an initial zoom still needs to leave the default fit mode.
         let centre = if self.viewport_screen.is_positive() { self.viewport_screen.center() } else { Pos2::ZERO };
@@ -1506,13 +1522,35 @@ impl DocView {
         }
     }
 
-    /// Standard zoom steps (as in Acrobat's zoom menu).
+    /// Standard zoom steps (as in Acrobat's zoom menu). With animations on, the view eases to
+    /// the step over [`ZOOM_ANIM_SECS`] (see [`Self::animate_zoom`]); a step pressed while one is
+    /// easing goes on from where that one was heading.
     pub fn zoom_step(&mut self, up: bool) {
         const STEPS: [f32; 17] = [0.1, 0.25, 0.33, 0.5, 0.66, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 32.0];
-        let z = self.zoom;
+        let z = self.zoom_anim.map_or(self.zoom, |a| a.to);
         let next = if up { STEPS.iter().copied().find(|s| *s > z * 1.01) } else { STEPS.iter().rev().copied().find(|s| *s < z * 0.99) };
         if let Some(n) = next {
-            self.set_zoom(n);
+            self.zoom_anim = Some(ZoomAnim { from: self.zoom, to: n, start: None });
+        }
+    }
+
+    /// Move a zoom step along: this frame's zoom on an ease-out curve in log scale (so every
+    /// step feels the same size), about the view's centre. With animations off it lands at once.
+    pub(crate) fn animate_zoom(&mut self, ctx: &egui::Context) {
+        let Some(mut a) = self.zoom_anim else { return };
+        let centre = if self.viewport_screen.is_positive() { self.viewport_screen.center() } else { Pos2::ZERO };
+        let now = ctx.input(|i| i.time);
+        let start = *a.start.get_or_insert(now);
+        let t = if crate::motion::animated(ctx) { ((now - start) / ZOOM_ANIM_SECS).clamp(0.0, 1.0) as f32 } else { 1.0 };
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let (from, to) = (a.from.max(0.01).ln(), a.to.max(0.01).ln());
+        let z = (from + (to - from) * eased).exp();
+        self.zoom_at(if t >= 1.0 { a.to } else { z }, centre);
+        if t >= 1.0 || !t.is_finite() {
+            self.zoom_anim = None;
+        } else {
+            self.zoom_anim = Some(a);
+            ctx.request_repaint();
         }
     }
 
@@ -2381,12 +2419,16 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         }
     }
 
+    // A zoom step easing to its zoom.
+    view.animate_zoom(ui.ctx());
     // Pinch / ctrl+scroll zoom, anchored on the current page.
     let zoom_delta = crate::motion::zoom_delta(ui.ctx());
     // Exclude the previous frame's scrollbar tracks from gesture activation.
     let navigation_rect = if view.viewport_screen.is_positive() { avail.intersect(view.viewport_screen) } else { avail };
     let navigation_enabled = app.dialog.is_none() && app.close_request.is_none() && !app.palette_open && ui.is_enabled() && ui.input(|i| i.focused);
     if zoom_delta.is_finite() && zoom_delta > 0.0 && zoom_delta != 1.0 && navigation_enabled && ui.rect_contains_pointer(navigation_rect) {
+        // The wheel or a pinch takes over from a zoom step under way.
+        view.zoom_anim = None;
         let z = view.zoom * zoom_delta;
         match ui.input(|i| i.pointer.hover_pos()) {
             Some(p) => view.zoom_at(z, p),
@@ -2402,6 +2444,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     };
     // Ctrl/⌘ with a middle-button drag zooms about where the drag began.
     if let Some((factor, at)) = view.auto_scroll.take_zoom() {
+        view.zoom_anim = None;
         view.zoom_at(view.zoom * factor, at);
     }
 

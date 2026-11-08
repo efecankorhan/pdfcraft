@@ -2110,3 +2110,28 @@ fn a_stroke_zoomed_in_stays_drawn_until_its_tiles_are_redrawn() {
     }
     assert!(gone, "the tiles were redrawn and the stroke handed over to them");
 }
+
+/// A zoom step (Ctrl/⌘ +/−, the zoom buttons) eases to its zoom when animations are on: part
+/// way after one frame, there after a fifth of a second; a second step goes on from the first's
+/// target. With animations off it lands at once.
+#[test]
+fn zoom_steps_ease_to_their_zoom() {
+    let mut h = fine_harness(|app| app.set_option("zoom", "100").unwrap());
+    h.ctx.all_styles_mut(|s| s.animation_time = 1.0 / 12.0);
+    h.run_steps(3);
+    let z = |h: &Harness<'static, PdfCraftApp>| h.state().views[0].zoom;
+    assert!((z(&h) - 1.0).abs() < 1e-4);
+    h.state_mut().views[0].zoom_step(true);
+    h.run_steps(2);
+    let mid = z(&h);
+    assert!(mid > 1.0 + 1e-3 && mid < 1.25 - 1e-3, "part way after a frame: {mid}");
+    h.state_mut().views[0].zoom_step(true);
+    h.run_steps(20);
+    assert!((z(&h) - 1.5).abs() < 1e-4, "two steps: 100% → 125% → 150%, landed: {}", z(&h));
+
+    // Animations off: at once.
+    h.ctx.all_styles_mut(|s| s.animation_time = 0.0);
+    h.state_mut().views[0].zoom_step(false);
+    h.step();
+    assert!((z(&h) - 1.25).abs() < 1e-4, "{}", z(&h));
+}
