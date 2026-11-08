@@ -1800,6 +1800,9 @@ action wizard	Start	Iniciar
 	Polygon	Polígono
 	Connected lines	Líneas conectadas
 	Eraser	Borrador
+	Change palette colour	Cambiar color de la paleta
+	Segment eraser	Borrador de segmentos
+	Stroke eraser (whole stroke)	Borrador de trazos (trazo completo)
 	Sign	Firmar
 	Certified by {by}	Certificado por {by}
 	At least one signature is invalid.	Al menos una firma no es válida.

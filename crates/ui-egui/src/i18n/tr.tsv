@@ -1683,6 +1683,9 @@
 	Polygon	Çokgen
 	Connected lines	Bağlantılı çizgiler
 	Eraser	Silgi
+	Change palette colour	Palet rengini değiştir
+	Segment eraser	Parça silgisi
+	Stroke eraser (whole stroke)	Çizgi silgisi (tüm çizgi)
 	Sign	İmzala
 	Certified by {by}	{by} tarafından onaylandı
 	At least one signature is invalid.	En az bir imza geçersiz.

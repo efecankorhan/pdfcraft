@@ -2541,10 +2541,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         }
     };
 
-    let freehand_tool = matches!(
-        app.quick_tool,
-        QuickTool::Lasso | QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser)
-    ) || view.comments.gesture.is_some();
+    let freehand_tool = matches!(app.quick_tool, QuickTool::Lasso | QuickTool::Comment(comments::CommentTool::Ink | comments::CommentTool::Eraser))
+        || view.comments.gesture.is_some();
     let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource {
         drag: if middle_gesture || freehand_tool {
             egui::scroll_area::DragScroll::Never
@@ -3134,8 +3132,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 || on_field
                 || comments::page_input(ui, &resp, &pcx, view);
 
-            let preview_target =
-                (matches!(tool, QuickTool::Select | QuickTool::Lasso | QuickTool::Fill(_)) && !comments_hidden).then_some(view.comments.selected).flatten();
+            let preview_target = (matches!(tool, QuickTool::Select | QuickTool::Lasso | QuickTool::Fill(_)) && !comments_hidden)
+                .then_some(view.comments.selected)
+                .flatten();
             view.signature_drag.prepare(ui.ctx(), doc, preview_target, scale);
             view.signature_drag.paint(painter, &pcx, &view.comments, view.pending_edit.as_ref());
 
@@ -4718,11 +4717,7 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                         .any(|a| a.page == page && a.index == annotation && a.in_reply_to.is_none() && comments::made_by(a, tool))
                             })
                         {
-                            app.apply_edit(Edit::FontSizeAnnotation {
-                                page,
-                                index: annotation,
-                                size,
-                            });
+                            app.apply_edit(Edit::FontSizeAnnotation { page, index: annotation, size });
                         }
                     }
                 });

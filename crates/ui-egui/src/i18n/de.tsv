@@ -1723,6 +1723,9 @@
 	Polygon	Polygon
 	Connected lines	Verbundene Linien
 	Eraser	Radierer
+	Change palette colour	Palettenfarbe ändern
+	Segment eraser	Abschnittsradierer
+	Stroke eraser (whole stroke)	Strichradierer (ganzer Strich)
 	Sign	Signieren
 	Certified by {by}	Zertifiziert von {by}
 	At least one signature is invalid.	Mindestens eine Signatur ist ungültig.

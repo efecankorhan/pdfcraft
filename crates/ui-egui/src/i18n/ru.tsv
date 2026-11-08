@@ -1788,6 +1788,9 @@
 	Polygon	Многоугольник
 	Connected lines	Соединённые линии
 	Eraser	Ластик
+	Change palette colour	Изменить цвет палитры
+	Segment eraser	Ластик по участкам
+	Stroke eraser (whole stroke)	Ластик штрихов (весь штрих)
 	Sign	Подписать
 	Certified by {by}	Сертифицировано: {by}
 	At least one signature is invalid.	Хотя бы одна подпись недействительна.

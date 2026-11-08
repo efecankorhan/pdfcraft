@@ -1794,6 +1794,9 @@
 	Polygon	Poligono
 	Connected lines	Linee collegate
 	Eraser	Gomma
+	Change palette colour	Cambia colore della tavolozza
+	Segment eraser	Gomma a segmenti
+	Stroke eraser (whole stroke)	Gomma a tratti (tratto intero)
 	Sign	Firma
 	Certified by {by}	Certificato da {by}
 	At least one signature is invalid.	Almeno una firma non è valida.

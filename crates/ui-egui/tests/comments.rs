@@ -1489,21 +1489,11 @@ fn radial_menu_tablet_handwriting_palette() {
     // Pressing/dragging with right-click (or tablet barrel button) in ink mode must NOT draw ink,
     // and releasing it opens the radial menu.
     h.event(egui::Event::PointerMoved(p));
-    h.event(egui::Event::PointerButton {
-        pos: p,
-        button: egui::PointerButton::Secondary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
     h.step();
     h.event(egui::Event::PointerMoved(p2));
     h.step();
-    h.event(egui::Event::PointerButton {
-        pos: p2,
-        button: egui::PointerButton::Secondary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+    h.event(egui::Event::PointerButton { pos: p2, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(2);
     assert!(comments(&h).is_empty(), "right-click must not draw an ink stroke");
     assert!(h.state().views[0].comments.radial_menu.is_some(), "right-click opens radial menu");
@@ -1511,18 +1501,8 @@ fn radial_menu_tablet_handwriting_palette() {
 
     // Tapping / clicking while the radial menu is open must NOT draw on the canvas underneath
     h.event(egui::Event::PointerMoved(p));
-    h.event(egui::Event::PointerButton {
-        pos: p,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::PointerButton {
-        pos: p,
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(2);
     assert!(comments(&h).is_empty(), "clicking while radial menu is open must not create an ink dot");
 
@@ -1542,13 +1522,8 @@ fn radial_menu_tablet_handwriting_palette() {
 
     // Exercise Thickness, FontSize, Colors, and CustomColor modes
     for mode in [RadialMode::Thickness, RadialMode::FontSize, RadialMode::Colors, RadialMode::More, RadialMode::CustomColor] {
-        h.state_mut().views[0].comments.radial_menu = Some(pdfcraft_ui_egui::radial_menu::RadialMenu {
-            screen_pos: p,
-            page: 0,
-            at: [150.0, 100.0],
-            mode,
-            opened_at: 0.0,
-        });
+        h.state_mut().views[0].comments.radial_menu =
+            Some(pdfcraft_ui_egui::radial_menu::RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode, opened_at: 0.0 });
         h.run_steps(2);
     }
 
@@ -1578,18 +1553,8 @@ fn radial_menu_tablet_handwriting_palette() {
     // Single click in Ink mode (when radial menu is closed) places a dot on the page
     let dot_pos = at(&h, 100.0, 90.0);
     h.event(egui::Event::PointerMoved(dot_pos));
-    h.event(egui::Event::PointerButton {
-        pos: dot_pos,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::PointerButton {
-        pos: dot_pos,
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+    h.event(egui::Event::PointerButton { pos: dot_pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: dot_pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(3);
     assert_eq!(comments(&h).len(), 1, "single click in ink mode must place a dot");
     h.state_mut().execute("edit.undo");
@@ -1626,33 +1591,17 @@ fn radial_menu_tablet_handwriting_palette() {
     // Dragging inside the lasso-selected group moves both strokes
     drag_pt(&mut h, (80.0, 60.0), (80.0, 110.0));
     assert!(
-        (comments(&h)[0].rect[1] - before_rect_0[1]).abs() > 10.0
-            && (comments(&h)[1].rect[1] - before_rect_1[1]).abs() > 10.0,
+        (comments(&h)[0].rect[1] - before_rect_0[1]).abs() > 10.0 && (comments(&h)[1].rect[1] - before_rect_1[1]).abs() > 10.0,
         "dragging a lasso selection must move all enclosed strokes together"
     );
 
     // Second right-click toggles the radial menu closed without opening another menu
-    h.state_mut().views[0].comments.radial_menu = Some(pdfcraft_ui_egui::radial_menu::RadialMenu {
-        screen_pos: p2,
-        page: 0,
-        at: [220.0, 140.0],
-        mode: RadialMode::Tools,
-        opened_at: 0.0,
-    });
+    h.state_mut().views[0].comments.radial_menu =
+        Some(pdfcraft_ui_egui::radial_menu::RadialMenu { screen_pos: p2, page: 0, at: [220.0, 140.0], mode: RadialMode::Tools, opened_at: 0.0 });
     h.run_steps(2);
     h.event(egui::Event::PointerMoved(p2));
-    h.event(egui::Event::PointerButton {
-        pos: p2,
-        button: egui::PointerButton::Secondary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::PointerButton {
-        pos: p2,
-        button: egui::PointerButton::Secondary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+    h.event(egui::Event::PointerButton { pos: p2, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: p2, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
     h.run_steps(2);
     assert!(h.state().views[0].comments.radial_menu.is_none(), "second right-click closes radial menu");
     assert!(h.query_by_label("Add a sticky note here").is_none(), "rectangular context menu must not open on second right-click");
@@ -1666,15 +1615,91 @@ fn radial_menu_tablet_handwriting_palette() {
     let near_edge_start = egui::pos2(page_before.center().x, vp.bottom() - 8.0);
     let near_edge_end = egui::pos2(page_before.center().x + 40.0, vp.bottom() - 6.0);
     h.event(egui::Event::PointerMoved(near_edge_start));
-    h.event(egui::Event::PointerButton { pos: near_edge_start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton {
+        pos: near_edge_start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
     h.step();
     h.event(egui::Event::PointerMoved(near_edge_end));
     h.run_steps(3);
-    h.event(egui::Event::PointerButton { pos: near_edge_end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton {
+        pos: near_edge_end,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
     h.run_steps(3);
     let page_after = h.state().views[0].page_screen_rect(0).expect("page rect");
     assert_eq!(page_before, page_after, "page screen rect must stay still while writing with Ink near the viewport edge");
 }
 
+/// The radial wheel: each pen mode keeps its own colour and width, a palette wedge recolours the
+/// current pen, picking a slot never draws on the page underneath, and the centre is Back in a
+/// sub-menu and Close in the main one. Slots are clicked by their accessibility labels, so the
+/// clicks go through the wheel's real hit testing.
+#[test]
+fn radial_wheel_pen_modes_keep_their_own_styles() {
+    use pdfcraft_ui_egui::comments::{CommentTool, PenMode};
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    h.state_mut().set_option("panel", "none").unwrap();
+    h.run_steps(2);
+    let open = |h: &mut Harness<'static, PdfCraftApp>| {
+        let p = at(h, 150.0, 100.0);
+        h.state_mut().views[0].comments.radial_menu =
+            Some(RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode: RadialMode::Tools, opened_at: 0.0 });
+        h.run_steps(3);
+    };
+    let ink = |h: &Harness<'static, PdfCraftApp>| h.state().comment_prefs.style(CommentTool::Ink);
+    let mode = |h: &Harness<'static, PdfCraftApp>| h.state().views[0].comments.radial_menu.as_ref().map(|r| r.mode);
 
+    open(&mut h);
+    h.get_by_label("Pencil").click();
+    h.run_steps(3);
+    assert_eq!(mode(&h), None, "picking a pen closes the wheel");
+    assert_eq!(h.state().comment_prefs.pen_mode(), PenMode::Pencil);
+    assert_eq!((ink(&h).width, ink(&h).opacity), (1.0, 0.8));
+    assert!(comments(&h).is_empty(), "the click on the wheel draws nothing on the page");
 
+    open(&mut h);
+    h.get_by_label("Marker").click();
+    h.run_steps(3);
+    assert_eq!(h.state().comment_prefs.pen_mode(), PenMode::Marker);
+    assert_eq!((ink(&h).width, ink(&h).opacity), (6.0, 1.0));
+
+    // A palette wedge recolours the marker only.
+    open(&mut h);
+    h.get_by_label("Green").click();
+    h.run_steps(3);
+    assert_eq!(ink(&h).color, [0.18, 0.62, 0.36]);
+    drag_pt(&mut h, (40.0, 60.0), (120.0, 60.0));
+    let c = comments(&h);
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].subtype, "Ink");
+    assert_eq!(c[0].color, Some([0.18, 0.62, 0.36]));
+
+    // Back to the pencil: its own grey and width return; the marker keeps its green.
+    open(&mut h);
+    h.get_by_label("Pencil").click();
+    h.run_steps(3);
+    assert_eq!((ink(&h).color, ink(&h).width), ([0.25, 0.25, 0.27], 1.0));
+    open(&mut h);
+    h.get_by_label("Marker").click();
+    h.run_steps(3);
+    assert_eq!((ink(&h).color, ink(&h).width), ([0.18, 0.62, 0.36], 6.0));
+
+    // The centre goes back from a sub-menu, then closes the wheel.
+    open(&mut h);
+    h.get_by_label("Shapes…").click();
+    h.run_steps(3);
+    assert_eq!(mode(&h), Some(RadialMode::Shapes));
+    h.get_by_label("Back").click();
+    h.run_steps(3);
+    assert_eq!(mode(&h), Some(RadialMode::Tools));
+    h.get_by_label("Close").click();
+    h.run_steps(3);
+    assert_eq!(mode(&h), None);
+    assert_eq!(comments(&h).len(), 1, "no wheel click drew on the page");
+}

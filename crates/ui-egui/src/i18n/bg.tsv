@@ -1750,6 +1750,9 @@
 	Polygon	Многоъгълник
 	Connected lines	Свързани линии
 	Eraser	Гумичка
+	Change palette colour	Смяна на цвят в палитрата
+	Segment eraser	Гумичка за отсечки
+	Stroke eraser (whole stroke)	Гумичка за щрихи (цял щрих)
 	Sign	Подпиши
 	Certified by {by}	Сертифициран от {by}
 	At least one signature is invalid.	Поне един подпис е невалиден.

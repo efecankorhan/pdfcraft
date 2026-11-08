@@ -1799,6 +1799,9 @@
 	Polygon	多角形
 	Connected lines	連結線
 	Eraser	消しゴム
+	Change palette colour	パレットの色を変更
+	Segment eraser	部分消しゴム
+	Stroke eraser (whole stroke)	ストローク消しゴム（ストローク全体）
 	Sign	署名
 	Certified by {by}	証明者: {by}
 	At least one signature is invalid.	無効な署名があります。

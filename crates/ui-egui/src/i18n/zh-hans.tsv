@@ -1757,6 +1757,9 @@
 	Polygon	多边形
 	Connected lines	连接线
 	Eraser	橡皮擦
+	Change palette colour	更改调色板颜色
+	Segment eraser	分段橡皮擦
+	Stroke eraser (whole stroke)	笔画橡皮擦（整条笔画）
 	Sign	签名
 	Certified by {by}	认证方{by}
 	At least one signature is invalid.	至少一个签名无效。

@@ -1785,6 +1785,9 @@
 	Polygon	Багатокутник
 	Connected lines	Ламана лінія
 	Eraser	Гумка
+	Change palette colour	Змінити колір палітри
+	Segment eraser	Гумка для відрізків
+	Stroke eraser (whole stroke)	Гумка для штрихів (увесь штрих)
 	Sign	Підписати
 	Certified by {by}	Засвідчено: {by}
 	At least one signature is invalid.	Щонайменше один підпис недійсний.

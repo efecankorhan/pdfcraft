@@ -1787,6 +1787,9 @@
 	Polygon	مضلع
 	Connected lines	خطوط متصلة
 	Eraser	ممحاة
+	Change palette colour	تغيير لون اللوحة
+	Segment eraser	ممحاة المقاطع
+	Stroke eraser (whole stroke)	ممحاة الخطوط (الخط بأكمله)
 	Sign	توقيع
 	Certified by {by}	مصدَّق من {by}
 	At least one signature is invalid.	توقيع واحد على الأقل غير صالح.

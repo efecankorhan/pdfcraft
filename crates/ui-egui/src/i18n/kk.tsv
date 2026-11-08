@@ -1712,6 +1712,9 @@
 	Polygon	Көпбұрыш
 	Connected lines	Сынық сызық
 	Eraser	Өшіргіш
+	Change palette colour	Палитра түсін өзгерту
+	Segment eraser	Бөлік өшіргіші
+	Stroke eraser (whole stroke)	Сызық өшіргіші (бүкіл сызық)
 	Sign	Қол қою
 	Certified by {by}	Куәландырған: {by}
 	At least one signature is invalid.	Кемінде бір қолтаңба жарамсыз.

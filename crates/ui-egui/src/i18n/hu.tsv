@@ -1708,6 +1708,9 @@
 	Polygon	Sokszög
 	Connected lines	Összekötött vonalak
 	Eraser	Radír
+	Change palette colour	Palettaszín módosítása
+	Segment eraser	Szakaszradír
+	Stroke eraser (whole stroke)	Vonalradír (teljes vonal)
 	Sign	Aláírás
 	Certified by {by}	Hitelesítette: {by}
 	At least one signature is invalid.	Legalább egy aláírás érvénytelen.

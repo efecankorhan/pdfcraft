@@ -1700,6 +1700,9 @@
 	Polygon	多邊形
 	Connected lines	連線線
 	Eraser	橡皮擦
+	Change palette colour	變更調色盤顏色
+	Segment eraser	分段橡皮擦
+	Stroke eraser (whole stroke)	筆畫橡皮擦（整條筆畫）
 	Sign	簽名
 	Certified by {by}	認證方{by}
 	At least one signature is invalid.	至少一個簽名無效。

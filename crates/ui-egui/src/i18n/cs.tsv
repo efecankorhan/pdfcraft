@@ -1834,6 +1834,9 @@ key	Space	Mezerník
 	Polygon	Mnohoúhelník
 	Connected lines	Lomená čára
 	Eraser	Guma
+	Change palette colour	Změnit barvu palety
+	Segment eraser	Guma po částech
+	Stroke eraser (whole stroke)	Guma tahů (celý tah)
 	Sign	Podepsat
 	Certified by {by}	Certifikováno: {by}
 	At least one signature is invalid.	Alespoň jeden podpis je neplatný.

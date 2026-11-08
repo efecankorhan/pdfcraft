@@ -240,6 +240,71 @@ pub fn color32(c: Rgb) -> Color32 {
     Color32::from_rgb(b(c[0]), b(c[1]), b(c[2]))
 }
 
+/// The freehand pen's modes (the radial menu's pens). Each keeps its own colour, width and
+/// opacity, so switching from the highlighter back to the pen restores the pen as it was. All of
+/// them draw `Ink` comments; the mode only picks the style the next stroke gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PenMode {
+    /// Opaque everyday pen.
+    #[default]
+    Pen,
+    /// Fine, slightly translucent graphite line for sketches and margin notes.
+    Pencil,
+    /// Thick opaque felt-tip.
+    Marker,
+    /// Wide translucent stroke for marking over text.
+    Highlighter,
+}
+
+impl PenMode {
+    pub const ALL: [PenMode; 4] = [PenMode::Pen, PenMode::Pencil, PenMode::Marker, PenMode::Highlighter];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pen => "Pen",
+            Self::Pencil => "Pencil",
+            Self::Marker => "Marker",
+            Self::Highlighter => "Highlighter",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Pen => "pen-tool",
+            Self::Pencil => "pencil",
+            Self::Marker => "brush",
+            Self::Highlighter => "highlighter",
+        }
+    }
+
+    /// The mode's starting style; the pen starts from the Ink tool's default `pen` colour and width.
+    fn default_style(self, pen: (Rgb, f64)) -> PenStyle {
+        match self {
+            Self::Pen => PenStyle { color: pen.0, width: pen.1, opacity: 1.0 },
+            Self::Pencil => PenStyle { color: [0.25, 0.25, 0.27], width: 1.0, opacity: 0.8 },
+            Self::Marker => PenStyle { color: [0.89, 0.13, 0.13], width: 6.0, opacity: 1.0 },
+            Self::Highlighter => PenStyle { color: [1.0, 0.94, 0.0], width: 10.0, opacity: 0.4 },
+        }
+    }
+
+    fn slot(self) -> usize {
+        match self {
+            Self::Pen => 0,
+            Self::Pencil => 1,
+            Self::Marker => 2,
+            Self::Highlighter => 3,
+        }
+    }
+}
+
+/// A pen mode's saved style.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenStyle {
+    pub color: Rgb,
+    pub width: f64,
+    pub opacity: f64,
+}
+
 /// Commenting preferences shared by every document (author, per-tool styles, pin).
 #[derive(Clone, Debug)]
 pub struct CommentPrefs {
@@ -256,10 +321,10 @@ pub struct CommentPrefs {
     pub stroke_eraser: bool,
     /// Default font size for Text Box and Callout comments (pt).
     pub text_box_font_size: f64,
-    /// Saved (color, width) for opaque Pen mode on `CommentTool::Ink`.
-    pub pen_style: (Rgb, f64),
-    /// Saved (color, width) for translucent Freehand Highlighter mode on `CommentTool::Ink`.
-    pub highlighter_style: (Rgb, f64),
+    /// The pen mode the Ink tool draws with; its style is the Ink tool's style.
+    pen_mode: PenMode,
+    /// Each pen mode's saved style, by `PenMode::slot` (the current mode's is kept in sync).
+    pen_styles: [PenStyle; 4],
     /// Customizable 8-color palette displayed in the radial menu.
     pub radial_palette: [Rgb; 8],
     /// Which slot (0..8) in `radial_palette` is targeted when picking a custom colour.
@@ -277,17 +342,17 @@ impl Default for CommentPrefs {
             hide_empty_highlight_hover: false,
             stroke_eraser: true,
             text_box_font_size: 12.0,
-            pen_style: (ink_default.color, ink_default.width),
-            highlighter_style: ([1.0, 0.94, 0.0], 10.0),
+            pen_mode: PenMode::Pen,
+            pen_styles: PenMode::ALL.map(|m| m.default_style((ink_default.color, ink_default.width))),
             radial_palette: [
-                [0.0, 0.0, 0.0],     // Black
-                [0.0, 0.47, 0.84],   // Blue
-                [0.36, 0.75, 0.98],  // Cyan
-                [0.18, 0.62, 0.36],  // Green
-                [1.0, 0.94, 0.0],    // Yellow
-                [1.0, 0.54, 0.0],    // Orange
-                [0.89, 0.13, 0.13],  // Red
-                [0.54, 0.25, 0.82],  // Purple
+                [0.0, 0.0, 0.0],    // Black
+                [0.0, 0.47, 0.84],  // Blue
+                [0.36, 0.75, 0.98], // Cyan
+                [0.18, 0.62, 0.36], // Green
+                [1.0, 0.94, 0.0],   // Yellow
+                [1.0, 0.54, 0.0],   // Orange
+                [0.89, 0.13, 0.13], // Red
+                [0.54, 0.25, 0.82], // Purple
             ],
             selected_palette_slot: 4,
         }
@@ -300,34 +365,54 @@ impl CommentPrefs {
     }
 
     pub fn is_freehand_highlighter(&self) -> bool {
-        self.style(CommentTool::Ink).opacity < 0.85
+        self.pen_mode == PenMode::Highlighter
     }
 
-    /// Switch `CommentTool::Ink` to opaque Pen mode, restoring the last pen colour and width.
+    /// The pen mode the Ink tool draws with.
+    pub fn pen_mode(&self) -> PenMode {
+        self.pen_mode
+    }
+
+    /// A pen mode's style (the current mode's is the Ink tool's style).
+    pub fn pen_style(&self, mode: PenMode) -> PenStyle {
+        if mode == self.pen_mode {
+            let s = self.style(CommentTool::Ink);
+            return PenStyle { color: s.color, width: s.width, opacity: s.opacity };
+        }
+        self.saved_pen_style(mode)
+    }
+
+    /// Switch the Ink tool to `mode`: the current mode keeps its style, and `mode`'s is restored.
+    pub fn activate_pen_mode(&mut self, mode: PenMode) {
+        self.save_pen_style();
+        self.pen_mode = mode;
+        let saved = self.saved_pen_style(mode);
+        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
+            s.color = saved.color;
+            s.width = saved.width.clamp(0.5, 16.0);
+            s.opacity = saved.opacity.clamp(0.1, 1.0);
+        }
+    }
+
+    /// Switch the Ink tool to the opaque pen.
     pub fn activate_pen(&mut self) {
-        if self.is_freehand_highlighter() {
-            let cur = self.style(CommentTool::Ink);
-            self.highlighter_style = (cur.color, cur.width);
-        }
-        let (color, width) = self.pen_style;
-        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
-            s.color = color;
-            s.width = width.clamp(0.5, 16.0);
-            s.opacity = 1.0;
-        }
+        self.activate_pen_mode(PenMode::Pen);
     }
 
-    /// Switch `CommentTool::Ink` to translucent Freehand Highlighter mode, restoring the last highlighter colour and width.
+    /// Switch the Ink tool to the translucent freehand highlighter.
     pub fn activate_freehand_highlighter(&mut self) {
-        if !self.is_freehand_highlighter() {
-            let cur = self.style(CommentTool::Ink);
-            self.pen_style = (cur.color, cur.width);
-        }
-        let (color, width) = self.highlighter_style;
-        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
-            s.color = color;
-            s.width = width.clamp(0.5, 16.0);
-            s.opacity = 0.4;
+        self.activate_pen_mode(PenMode::Highlighter);
+    }
+
+    fn saved_pen_style(&self, mode: PenMode) -> PenStyle {
+        self.pen_styles.get(mode.slot()).copied().unwrap_or(PenStyle { color: [0.0; 3], width: 2.0, opacity: 1.0 })
+    }
+
+    /// Remember the Ink tool's style as the current pen mode's.
+    fn save_pen_style(&mut self) {
+        let s = self.style(CommentTool::Ink);
+        if let Some(slot) = self.pen_styles.get_mut(self.pen_mode.slot()) {
+            *slot = PenStyle { color: s.color, width: s.width, opacity: s.opacity };
         }
     }
 
@@ -342,13 +427,9 @@ impl CommentPrefs {
         }
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             s.color = c;
-            if tool == CommentTool::Ink {
-                if s.opacity < 0.85 {
-                    self.highlighter_style.0 = c;
-                } else {
-                    self.pen_style.0 = c;
-                }
-            }
+        }
+        if tool == CommentTool::Ink {
+            self.save_pen_style();
         }
     }
 
@@ -362,13 +443,9 @@ impl CommentPrefs {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             let clamped = w.clamp(0.5, 16.0);
             s.width = clamped;
-            if tool == CommentTool::Ink {
-                if s.opacity < 0.85 {
-                    self.highlighter_style.1 = clamped;
-                } else {
-                    self.pen_style.1 = clamped;
-                }
-            }
+        }
+        if tool == CommentTool::Ink {
+            self.save_pen_style();
         }
     }
 
@@ -376,13 +453,9 @@ impl CommentPrefs {
     pub fn set_opacity(&mut self, tool: CommentTool, o: f64) {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             s.opacity = if o.is_finite() { o.clamp(0.1, 1.0) } else { 1.0 };
-            if tool == CommentTool::Ink {
-                if s.opacity < 0.85 {
-                    self.highlighter_style = (s.color, s.width);
-                } else {
-                    self.pen_style = (s.color, s.width);
-                }
-            }
+        }
+        if tool == CommentTool::Ink {
+            self.save_pen_style();
         }
     }
 
@@ -396,6 +469,9 @@ impl CommentPrefs {
     pub fn set_style(&mut self, tool: CommentTool, style: Style) {
         if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == tool) {
             *s = style;
+        }
+        if tool == CommentTool::Ink {
+            self.save_pen_style();
         }
     }
 }
@@ -825,11 +901,13 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
         cv.cancelled_drag = true;
         return true;
     }
-    let (secondary_pressed, secondary_down, secondary_released) = ui.input(|i| (
-        i.pointer.button_pressed(egui::PointerButton::Secondary),
-        i.pointer.secondary_down(),
-        i.pointer.button_released(egui::PointerButton::Secondary),
-    ));
+    let (secondary_pressed, secondary_down, secondary_released) = ui.input(|i| {
+        (
+            i.pointer.button_pressed(egui::PointerButton::Secondary),
+            i.pointer.secondary_down(),
+            i.pointer.button_released(egui::PointerButton::Secondary),
+        )
+    });
     if secondary_pressed || secondary_down || secondary_released {
         cv.gesture = None;
         cv.cancelled_drag = true;
@@ -845,12 +923,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
             cv.selected = cx.hit(p).map(|a| (cx.page, a.index));
             cv.also.clear();
         }
-        if is_freehand
-            || (cv.selected.is_none()
-                && !has_link_context
-                && !has_selected_text
-                && !(cx.tool == QuickTool::Select && cx.over_image))
-        {
+        if is_freehand || (cv.selected.is_none() && !has_link_context && !has_selected_text && !(cx.tool == QuickTool::Select && cx.over_image)) {
             cv.radial_menu = Some(crate::radial_menu::RadialMenu {
                 screen_pos: p,
                 page: cx.page,
@@ -1223,8 +1296,7 @@ fn lasso_grabs(ui: &egui::Ui, cx: &PageCx<'_>, view: &DocView) -> bool {
     let Some(p) = press_point(ui, cx) else { return false };
     on_handle(cx, view, p, |_| true)
         || (cv.selected.is_some_and(|(page, _)| page == cx.page)
-            && (cx.hit(p).is_some_and(|a| !is_markup(&a.subtype))
-                || selected_group_rect(cx, cv).is_some_and(|r| r.contains(p))))
+            && (cx.hit(p).is_some_and(|a| !is_markup(&a.subtype)) || selected_group_rect(cx, cv).is_some_and(|r| r.contains(p))))
 }
 
 /// With a Fill & Sign tool, the Fill & Sign marks already on the page are picked up as with the
@@ -1387,13 +1459,8 @@ fn select_input(
                     if cv.also.is_empty() {
                         view.pending_edit = Some(Edit::MoveAnnotation { page, index, dx, dy });
                     } else {
-                        let mut edits: Vec<Edit> = cv
-                            .also
-                            .iter()
-                            .copied()
-                            .chain(std::iter::once(index))
-                            .map(|i| Edit::MoveAnnotation { page, index: i, dx, dy })
-                            .collect();
+                        let mut edits: Vec<Edit> =
+                            cv.also.iter().copied().chain(std::iter::once(index)).map(|i| Edit::MoveAnnotation { page, index: i, dx, dy }).collect();
                         edits.dedup_by_key(|e| match e {
                             Edit::MoveAnnotation { index, .. } => *index,
                             _ => usize::MAX,
@@ -1590,10 +1657,7 @@ fn smooth_polyline(pts: &[Pos2]) -> Vec<Pos2> {
         let p0 = pts[i - 1];
         let p1 = pts[i];
         let p2 = pts[i + 1];
-        filtered.push(Pos2::new(
-            0.2 * p0.x + 0.6 * p1.x + 0.2 * p2.x,
-            0.2 * p0.y + 0.6 * p1.y + 0.2 * p2.y,
-        ));
+        filtered.push(Pos2::new(0.2 * p0.x + 0.6 * p1.x + 0.2 * p2.x, 0.2 * p0.y + 0.6 * p1.y + 0.2 * p2.y));
     }
     filtered.push(pts[n - 1]);
 
@@ -1615,10 +1679,7 @@ fn smooth_polyline(pts: &[Pos2]) -> Vec<Pos2> {
         for s in 1..=steps {
             let t = s as f32 / steps as f32;
             let omt = 1.0 - t;
-            let pt = p1 * (omt * omt * omt)
-                + c1.to_vec2() * (3.0 * omt * omt * t)
-                + c2.to_vec2() * (3.0 * omt * t * t)
-                + p2.to_vec2() * (t * t * t);
+            let pt = p1 * (omt * omt * omt) + c1.to_vec2() * (3.0 * omt * omt * t) + c2.to_vec2() * (3.0 * omt * t * t) + p2.to_vec2() * (t * t * t);
             smooth.push(pt);
         }
     }
@@ -1703,10 +1764,7 @@ fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
                     let p_prev = points[i - 1];
                     let p_curr = points[i];
                     let p_next = points[i + 1];
-                    s.push([
-                        0.2 * p_prev[0] + 0.6 * p_curr[0] + 0.2 * p_next[0],
-                        0.2 * p_prev[1] + 0.6 * p_curr[1] + 0.2 * p_next[1],
-                    ]);
+                    s.push([0.2 * p_prev[0] + 0.6 * p_curr[0] + 0.2 * p_next[0], 0.2 * p_prev[1] + 0.6 * p_curr[1] + 0.2 * p_next[1]]);
                 }
                 s.push(points[points.len() - 1]);
                 s
@@ -1906,7 +1964,10 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
             Some(new_comment(
                 &cx,
                 CommentTool::TextBox,
-                Shape::TextBox { rect: text_box_rect(c.at, &text, prefs.text_box_font_size, page_rotation(info, page)), font_size: prefs.text_box_font_size },
+                Shape::TextBox {
+                    rect: text_box_rect(c.at, &text, prefs.text_box_font_size, page_rotation(info, page)),
+                    font_size: prefs.text_box_font_size,
+                },
                 text,
             ))
         }
@@ -2039,9 +2100,7 @@ pub(crate) fn page_rotation(info: &DocInfo, page: usize) -> i64 {
 /// Delete / Escape handling for comments (only while no text field has focus).
 pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool, allowed: bool) {
     if !ctx.input(|i| {
-        i.pointer.any_down()
-            || i.pointer.button_released(egui::PointerButton::Primary)
-            || i.pointer.button_released(egui::PointerButton::Secondary)
+        i.pointer.any_down() || i.pointer.button_released(egui::PointerButton::Primary) || i.pointer.button_released(egui::PointerButton::Secondary)
     }) {
         view.comments.cancelled_drag = false;
     }

@@ -1707,6 +1707,9 @@ action wizard	Start	ప్రారంభించు
 	Polygon	పాలీగాన్
 	Connected lines	కలిపిన గీతలు
 	Eraser	ఎరేజర్
+	Change palette colour	పాలెట్ రంగును మార్చు
+	Segment eraser	భాగాల ఎరేజర్
+	Stroke eraser (whole stroke)	స్ట్రోక్ ఎరేజర్ (మొత్తం స్ట్రోక్)
 	Sign	సంతకం చేయి
 	Certified by {by}	{by} ద్వారా సర్టిఫై చేయబడింది
 	At least one signature is invalid.	కనీసం ఒక సంతకం చెల్లదు.

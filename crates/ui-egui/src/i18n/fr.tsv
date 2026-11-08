@@ -1718,6 +1718,9 @@
 	Polygon	Polygone
 	Connected lines	Lignes reliées
 	Eraser	Gomme
+	Change palette colour	Changer la couleur de la palette
+	Segment eraser	Gomme par segment
+	Stroke eraser (whole stroke)	Gomme par trait (trait entier)
 	Sign	Signer
 	Certified by {by}	Certifié par {by}
 	At least one signature is invalid.	Au moins une signature n'est pas valide.

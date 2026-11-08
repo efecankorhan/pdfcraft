@@ -1781,6 +1781,9 @@
 	Polygon	Wielokąt
 	Connected lines	Połączone linie
 	Eraser	Gumka
+	Change palette colour	Zmień kolor palety
+	Segment eraser	Gumka odcinków
+	Stroke eraser (whole stroke)	Gumka pociągnięć (całe pociągnięcie)
 	Sign	Podpisz
 	Certified by {by}	Certyfikowany przez {by}
 	At least one signature is invalid.	Co najmniej jeden podpis jest nieprawidłowy.

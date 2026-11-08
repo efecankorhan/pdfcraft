@@ -1622,6 +1622,9 @@
 	Polygon	Polígono
 	Connected lines	Linhas conectadas
 	Eraser	Borracha
+	Change palette colour	Alterar cor da paleta
+	Segment eraser	Borracha de segmentos
+	Stroke eraser (whole stroke)	Borracha de traços (traço inteiro)
 	Sign	Assinar
 	Certified by {by}	Certificado por {by}
 	At least one signature is invalid.	Pelo menos uma assinatura é inválida.

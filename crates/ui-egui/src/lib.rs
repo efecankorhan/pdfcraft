@@ -131,12 +131,12 @@ mod open_worker;
 mod organize_panel;
 pub mod portable;
 mod protect;
+pub mod radial_menu;
 mod recovery;
 pub mod scroll_speed;
 #[cfg(not(target_arch = "wasm32"))]
 mod system_fonts;
 mod tab_context;
-pub mod radial_menu;
 pub mod theme;
 pub mod ui_scale;
 pub mod updates;

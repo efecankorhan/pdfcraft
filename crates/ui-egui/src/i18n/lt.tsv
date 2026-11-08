@@ -2038,6 +2038,9 @@ comment menu	Edit	Redaguoti
 	Endpoint	Galinis taškas
 	Erase	Trinti
 	Eraser	Trintukas
+	Change palette colour	Keisti paletės spalvą
+	Segment eraser	Atkarpų trintukas
+	Stroke eraser (whole stroke)	Brūkšnių trintukas (visas brūkšnys)
 	Even pages	Lyginiai puslapiai
 	Everything on a page must be tagged or marked as an artifact (decoration, headers, footers). Tag the untagged content.	Visas puslapio turinys turi turėti struktūros žymas arba būti pažymėtas kaip pagalbinis elementas (puošyba, antraštės, poraštės). Pridėkite trūkstamas turinio žymas.
 	Execute a menu item	Vykdyti meniu komandą
