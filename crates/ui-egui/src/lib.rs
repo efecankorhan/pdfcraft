@@ -2288,6 +2288,8 @@ impl PdfCraftApp {
             .into();
         v["radial_palette"] = serde_json::json!(self.comment_prefs.radial_palette);
         v["pen_pressure"] = serde_json::Value::Bool(self.comment_prefs.pressure);
+        v["pen_pressure_sensitivity"] = serde_json::json!(self.comment_prefs.pressure_sensitivity);
+        v["pen_pressure_min"] = serde_json::json!(self.comment_prefs.pressure_min);
         // Set apart: one more key inside the macro above passes serde_json's recursion limit.
         v["redact_prefs"] = self.redact_defaults.to_json();
         // Set outside json! above, which is at serde_json's macro recursion limit.
@@ -2440,6 +2442,13 @@ impl PdfCraftApp {
         }
         if let Some(on) = v["pen_pressure"].as_bool() {
             self.comment_prefs.pressure = on;
+        }
+        // Untrusted: clamped into range, non-finite ignored.
+        if let Some(s) = v["pen_pressure_sensitivity"].as_f64().filter(|s| s.is_finite()) {
+            self.comment_prefs.pressure_sensitivity = s.clamp(0.0, 1.0) as f32;
+        }
+        if let Some(m) = v["pen_pressure_min"].as_f64().filter(|m| m.is_finite()) {
+            self.comment_prefs.pressure_min = m.clamp(0.05, 0.9) as f32;
         }
         if let Some(palette) = v["radial_palette"].as_array() {
             for (slot, c) in self.comment_prefs.radial_palette.iter_mut().zip(palette) {

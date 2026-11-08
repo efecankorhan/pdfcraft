@@ -1873,13 +1873,16 @@ fn border_width_of(d: &Dict) -> f64 {
     d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap_or(1.0).max(0.0)
 }
 
-/// A fountain-pen nib for a pen `width` (points): PDF ink has one line width per drawing, so the
-/// broad nib is drawn as `count` parallel hairlines `hairline` points wide spread over an edge
-/// `edge` points long, held at `angle_deg` (rising to the right). Neighbouring hairlines overlap,
-/// so together they fill the nib's sweep. One source for the drawing tool and for restyling.
+/// A fountain-pen nib for a pen `width` (points). PDF ink has one line width per drawing, so the
+/// nib is drawn as hairlines `hairline` points wide spread across the stroke. A fountain pen's
+/// nib is nearly round: every stroke gets `round` points of width whatever its direction, plus up
+/// to `edge` more when it runs across the nib's slant ([`NIB_ANGLE_DEG`]), a gentle thick–thin of
+/// about 1.8 : 1 rather than a calligraphy nib's 4 : 1. `count` hairlines span `edge` with
+/// neighbours overlapping. One source for the drawing tool and for restyling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NibLayout {
     pub edge: f64,
+    pub round: f64,
     pub count: usize,
     pub hairline: f64,
 }
@@ -1887,16 +1890,29 @@ pub struct NibLayout {
 /// The nib edge's angle: rising 35° to the right, as a right-handed writer holds an italic nib.
 pub const NIB_ANGLE_DEG: f64 = 35.0;
 
-/// The nib's edge as a share of the pen width setting.
-const NIB_EDGE_SHARE: f64 = 0.7;
+/// Shares of the pen width: the slant part of the nib, its round part, and each hairline. The
+/// widest stroke (across the slant) is edge + round + hairline = the pen width.
+const NIB_EDGE_SHARE: f64 = 0.45;
+const NIB_ROUND_SHARE: f64 = 0.34;
+const HAIRLINE_SHARE: f64 = 0.21;
+
+fn pen_width(width: f64) -> f64 {
+    if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 }
+}
+
+/// Each hairline's width for a pen width: the same for nibs and ribbons, so restyling a hairline
+/// drawing needs no guess at which pen drew it.
+fn hairline_for(width: f64) -> f64 {
+    (pen_width(width) * HAIRLINE_SHARE).max(0.45)
+}
 
 pub fn nib_layout(width: f64) -> NibLayout {
-    let width = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
+    let width = pen_width(width);
     let edge = width * NIB_EDGE_SHARE;
-    let hairline = (edge * 0.3).max(0.45);
+    let hairline = hairline_for(width);
     // Spaced at under half a hairline, so the sweep has no gaps at any zoom.
     let count = ((edge / (hairline * 0.45)).ceil() as usize + 1).clamp(2, 24);
-    NibLayout { edge, count, hairline }
+    NibLayout { edge, round: width * NIB_ROUND_SHARE, count, hairline }
 }
 
 /// Offsets (user space) from the centre line to each hairline of `nib`, along unit `dir`.
@@ -1913,12 +1929,11 @@ pub fn nib_offsets(nib: &NibLayout, dir: [f64; 2]) -> Vec<[f64; 2]> {
 /// A pressure-sensitive pen stroke drawn as a ribbon of hairlines across the stroke: `edge` is
 /// its width at full pressure. Same spacing rule as [`nib_layout`].
 pub fn ribbon_layout(width: f64) -> NibLayout {
-    let edge = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
-    // The same hairline as the nib's for this width (0.21 × width), so restyling a hairline
-    // drawing needs no guess at which pen drew it.
-    let hairline = (edge * NIB_EDGE_SHARE * 0.3).max(0.45);
+    let hairline = hairline_for(width);
+    // The hairline adds its own width, so at full pressure the ribbon is the pen width.
+    let edge = (pen_width(width) - hairline).max(0.0);
     let count = ((edge / (hairline * 0.45)).ceil() as usize + 1).clamp(2, 24);
-    NibLayout { edge, count, hairline }
+    NibLayout { edge, round: 0.0, count, hairline }
 }
 
 /// The hairlines of a ribbon around `centre`, where `spread[j]` is the full vector across the

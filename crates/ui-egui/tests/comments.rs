@@ -1804,14 +1804,14 @@ fn the_size_card_sets_any_pen_width() {
     assert!(comments(&h).is_empty(), "the click draws nothing on the page");
 }
 
-/// The fountain pen draws a broad nib held at an angle: one Ink comment whose hairlines sweep
-/// the nib, so a stroke across the nib's edge is wide and one along it is thin.
+/// The fountain pen's nearly round nib: one Ink comment of hairlines, down-strokes a little wider
+/// than cross-strokes, a pen's gentle thick–thin and not a calligraphy nib's.
 #[test]
 fn the_fountain_pen_is_thick_or_thin_by_direction() {
     use pdfcraft_ui_egui::comments::PenMode;
     let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
     h.state_mut().comment_prefs.activate_pen_mode(PenMode::Fountain);
-    h.state_mut().comment_prefs.set_width(pdfcraft_ui_egui::comments::CommentTool::Ink, 8.0);
+    h.state_mut().comment_prefs.set_width(pdfcraft_ui_egui::comments::CommentTool::Ink, 16.0);
     // The nib edge rises 35° to the right: a horizontal stroke is about edge × sin 35° thick,
     // a vertical one edge × cos 35°.
     drag_pt(&mut h, (40.0, 60.0), (140.0, 60.0));
@@ -1825,6 +1825,7 @@ fn the_fountain_pen_is_thick_or_thin_by_direction() {
     let tall = c.iter().map(|a| size(a.rect)).find(|(w, h)| h > w).expect("the vertical stroke");
     let (horizontal, vertical) = (wide.1, tall.0);
     assert!(vertical > horizontal + 1.0, "down-strokes are wider than cross-strokes: {horizontal} vs {vertical}");
+    assert!(horizontal > vertical * 0.7, "but only a little: {horizontal} vs {vertical}");
 }
 
 /// Dragging a colour of the wheel's palette onto another swaps them; it does not pick a colour
@@ -2014,4 +2015,22 @@ fn the_pressure_switch_toggles_and_is_remembered() {
     b.restore(&h.state().persist());
     assert!(!b.comment_prefs.pressure);
     assert!(comments(&h).is_empty());
+}
+
+/// Pressure sensitivity and the lightest touch's width survive a restart; hostile values are
+/// clamped or ignored.
+#[test]
+fn pressure_sensitivity_settings_are_remembered_and_clamped() {
+    let mut a = PdfCraftApp::new();
+    a.comment_prefs.pressure_sensitivity = 0.8;
+    a.comment_prefs.pressure_min = 0.4;
+    let mut b = PdfCraftApp::new();
+    b.restore(&a.persist());
+    assert_eq!((b.comment_prefs.pressure_sensitivity, b.comment_prefs.pressure_min), (0.8, 0.4));
+    let mut c = PdfCraftApp::new();
+    c.restore(r#"{"pen_pressure_sensitivity": 7, "pen_pressure_min": -1}"#);
+    assert_eq!((c.comment_prefs.pressure_sensitivity, c.comment_prefs.pressure_min), (1.0, 0.05));
+    let mut d = PdfCraftApp::new();
+    d.restore(r#"{"pen_pressure_sensitivity": "loud", "pen_pressure_min": null}"#);
+    assert_eq!((d.comment_prefs.pressure_sensitivity, d.comment_prefs.pressure_min), (0.5, 0.25));
 }

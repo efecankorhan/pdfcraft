@@ -346,6 +346,10 @@ pub struct CommentPrefs {
     pub selected_palette_slot: usize,
     /// Pen pressure varies the pen's width (pen, fountain pen and marker; never the highlighter).
     pub pressure: bool,
+    /// How readily pressure widens the stroke, 0 to 1: higher, a light touch draws wider.
+    pub pressure_sensitivity: f32,
+    /// The share of the pen's width the lightest touch draws, 0.05 to 0.9.
+    pub pressure_min: f32,
     /// Where pen pressure is read, 0 to 1, or `None` while the tip is up or for a mouse. Set by
     /// the platform shell (the desktop app on Windows); without one, strokes keep one width.
     pub pressure_source: Option<fn() -> Option<f32>>,
@@ -376,6 +380,8 @@ impl Default for CommentPrefs {
             ],
             selected_palette_slot: 4,
             pressure: true,
+            pressure_sensitivity: 0.5,
+            pressure_min: 0.25,
             pressure_source: None,
         }
     }
@@ -384,6 +390,16 @@ impl Default for CommentPrefs {
 impl CommentPrefs {
     pub fn style(&self, tool: CommentTool) -> Style {
         self.styles.iter().find(|(t, _)| *t == tool).map(|(_, s)| s.clone()).unwrap_or_default()
+    }
+
+    /// How much of the pen's width a pressure reading draws: the lightest touch draws
+    /// `pressure_min`, a full press the whole width, along a curve set by `pressure_sensitivity`
+    /// (0.5 is linear; higher bends it so a light touch already draws wide).
+    pub fn pressure_scale(&self, p: f32) -> f64 {
+        let p = if p.is_finite() { f64::from(p).clamp(0.0, 1.0) } else { 1.0 };
+        let s = if self.pressure_sensitivity.is_finite() { f64::from(self.pressure_sensitivity).clamp(0.0, 1.0) } else { 0.5 };
+        let min = if self.pressure_min.is_finite() { f64::from(self.pressure_min).clamp(0.05, 0.9) } else { 0.25 };
+        min + (1.0 - min) * p.powf(4f64.powf(0.5 - s))
     }
 
     pub fn is_freehand_highlighter(&self) -> bool {
@@ -1058,18 +1074,9 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                             let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
                             let style = cx.prefs.style(tool);
                             let colour = color32(style.color).gamma_multiply(style.opacity.clamp(0.3, 1.0) as f32);
-                            if cx.prefs.pen_mode() == PenMode::Fountain {
-                                // The fountain pen shows its nib: a short slash at the nib's angle.
-                                let half = ((pdfcraft_engine::nib_layout(style.width).edge as f32 * zoom).clamp(4.0, 24.0)) * 0.5;
-                                let (s, c) = (pdfcraft_engine::NIB_ANGLE_DEG as f32).to_radians().sin_cos();
-                                let d = vec2(c, -s) * half;
-                                cp.line_segment([p - d, p + d], Stroke::new(3.0, Color32::from_white_alpha(200)));
-                                cp.line_segment([p - d, p + d], Stroke::new(1.75, colour));
-                            } else {
-                                let dot_r = (style.width as f32 * zoom * 0.5).clamp(2.5, 12.0);
-                                cp.circle_filled(p, dot_r, colour);
-                                cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
-                            }
+                            let dot_r = (style.width as f32 * zoom * 0.5).clamp(2.5, 12.0);
+                            cp.circle_filled(p, dot_r, colour);
+                            cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
                         }
                     }
                 } else {
@@ -2087,12 +2094,6 @@ fn new_drawing(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, pressures: &[f3
     Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style, contents: String::new(), author: cx.prefs.author.clone() })
 }
 
-/// How much of the pen's width a pressure reading draws: a light touch still leaves a line.
-fn pressure_scale(p: f32) -> f64 {
-    let p = if p.is_finite() { f64::from(p).clamp(0.0, 1.0) } else { 1.0 };
-    0.25 + 0.75 * p.powf(0.8)
-}
-
 /// The hairlines a pen stroke (user space, already smoothed) is drawn as, with their width; or
 /// `None` for a plain stroke of one width. The fountain pen always draws its nib; pressure (when
 /// on, read for every point, and not for the highlighter) widens the nib or the pen's ribbon.
@@ -2105,7 +2106,7 @@ fn ink_hairlines(prefs: &CommentPrefs, width: f64, stroke: &[[f64; 2]], pressure
     }
     // Smooth the readings like the points, so the width swells instead of stepping.
     let scale: Vec<f64> = if use_pressure {
-        let raw: Vec<f64> = pressures.iter().map(|p| pressure_scale(*p)).collect();
+        let raw: Vec<f64> = pressures.iter().map(|p| prefs.pressure_scale(*p)).collect();
         (0..raw.len())
             .map(|j| {
                 let (a, b, c) = (raw.get(j.wrapping_sub(1)).or(raw.get(j)), raw.get(j), raw.get(j + 1).or(raw.get(j)));
@@ -2118,32 +2119,64 @@ fn ink_hairlines(prefs: &CommentPrefs, width: f64, stroke: &[[f64; 2]], pressure
     } else {
         vec![1.0; stroke.len()]
     };
+    // Across the stroke: the normal of the direction through each point's neighbours.
+    let normals = stroke_normals(stroke);
     let (spread, hairline): (Vec<[f64; 2]>, f64) = if fountain {
+        // A nearly round nib: across the stroke, the round part in every direction plus as much
+        // of the slant as the stroke runs across it (|n·d|). Taking the size of that share keeps
+        // it free of the normal's sign, which is noise for a stroke along the slant; smoothing
+        // makes the width swell at turns instead of stepping.
         let nib = pdfcraft_engine::nib_layout(width);
         let d = pdfcraft_engine::nib_direction();
-        (scale.iter().map(|k| [d[0] * nib.edge * k, d[1] * nib.edge * k]).collect(), nib.hairline)
-    } else {
-        // Across the stroke: the normal of the direction through each point's neighbours.
-        let lay = pdfcraft_engine::ribbon_layout(width);
-        let mut last_n = [0.0, 1.0];
-        let spread = (0..stroke.len())
-            .map(|j| {
-                let a = stroke.get(j.saturating_sub(1)).or(stroke.get(j));
-                let b = stroke.get(j + 1).or(stroke.get(j));
-                if let (Some(a), Some(b)) = (a, b) {
-                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-                    let len = dx.hypot(dy);
-                    if len.is_finite() && len > 1e-9 {
-                        last_n = [-dy / len, dx / len];
-                    }
-                }
-                let k = scale.get(j).copied().unwrap_or(1.0) * lay.edge;
-                [last_n[0] * k, last_n[1] * k]
+        let raw: Vec<[f64; 2]> = normals
+            .iter()
+            .zip(&scale)
+            .map(|(n, k)| {
+                let w = (nib.round + nib.edge * (n[0] * d[0] + n[1] * d[1]).abs()) * k;
+                [n[0] * w, n[1] * w]
             })
             .collect();
-        (spread, lay.hairline)
+        (smooth_vectors(&raw, 3), nib.hairline)
+    } else {
+        let lay = pdfcraft_engine::ribbon_layout(width);
+        (normals.iter().zip(&scale).map(|(n, k)| [n[0] * lay.edge * k, n[1] * lay.edge * k]).collect(), lay.hairline)
     };
     Some((pdfcraft_engine::ribbon_strokes(stroke, &spread, hairline), hairline))
+}
+
+/// The unit normal at each point of a stroke (from its neighbours); where the stroke doesn't
+/// move, the previous normal, and straight up for a single point.
+fn stroke_normals(stroke: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut last = [0.0, 1.0];
+    (0..stroke.len())
+        .map(|j| {
+            let a = stroke.get(j.saturating_sub(1)).or(stroke.get(j));
+            let b = stroke.get(j + 1).or(stroke.get(j));
+            if let (Some(a), Some(b)) = (a, b) {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = dx.hypot(dy);
+                if len.is_finite() && len > 1e-9 {
+                    last = [-dy / len, dx / len];
+                }
+            }
+            last
+        })
+        .collect()
+}
+
+/// `passes` rounds of a [1/4, 1/2, 1/4] filter over a run of vectors (ends kept).
+fn smooth_vectors(v: &[[f64; 2]], passes: usize) -> Vec<[f64; 2]> {
+    let mut cur = v.to_vec();
+    for _ in 0..passes {
+        let mut next = cur.clone();
+        for (i, w) in cur.windows(3).enumerate() {
+            if let (Some(o), [a, b, c]) = (next.get_mut(i + 1), w) {
+                *o = [0.25 * a[0] + 0.5 * b[0] + 0.25 * c[0], 0.25 * a[1] + 0.5 * b[1] + 0.25 * c[1]];
+            }
+        }
+        cur = next;
+    }
+    cur
 }
 
 /// The floating composer card (new note, new text box, edit). Returns the edit to apply.
@@ -2795,6 +2828,63 @@ pub fn status_badge(state: &str) -> Option<(&'static str, &'static str, Color32)
 
 #[cfg(test)]
 mod tests {
+    /// Width of a hairline drawing at its middle point, across direction `t` (unit).
+    fn drawn_width(lines: &[Vec<[f64; 2]>], hairline: f64, t: [f64; 2]) -> f64 {
+        let n = [-t[1], t[0]];
+        let offsets: Vec<f64> = lines.iter().filter_map(|l| l.get(l.len() / 2)).map(|p| p[0] * n[0] + p[1] * n[1]).collect();
+        offsets.iter().cloned().fold(f64::MIN, f64::max) - offsets.iter().cloned().fold(f64::MAX, f64::min) + hairline
+    }
+
+    #[test]
+    fn the_fountain_pen_has_a_gentle_thick_thin() {
+        let mut prefs = super::CommentPrefs::default();
+        prefs.activate_pen_mode(super::PenMode::Fountain);
+        let d = pdfcraft_engine::nib_direction();
+        let line = |t: [f64; 2]| (0..40).map(|i| [100.0 + t[0] * f64::from(i), 100.0 + t[1] * f64::from(i)]).collect::<Vec<_>>();
+        let width = |t: [f64; 2]| {
+            let (lines, hairline) = super::ink_hairlines(&prefs, 10.0, &line(t), &[]).expect("a fountain stroke is hairlines");
+            drawn_width(&lines, hairline, t)
+        };
+        let along = width(d);
+        let across = width([-d[1], d[0]]);
+        assert!((across - 10.0).abs() < 0.05, "across the slant: the pen width ({across})");
+        let ratio = across / along;
+        assert!((1.6..2.0).contains(&ratio), "a pen's thick–thin, not calligraphy: {ratio}");
+        // Every direction lies between the two.
+        for a in 0..12 {
+            let a = f64::from(a) * std::f64::consts::PI / 12.0;
+            let w = width([a.cos(), a.sin()]);
+            assert!(w >= along - 0.05 && w <= across + 0.05, "{a}: {w}");
+        }
+    }
+
+    #[test]
+    fn pressure_sensitivity_bends_the_curve_and_minimum_sets_the_lightest_touch() {
+        let mut p = super::CommentPrefs::default();
+        assert!((p.pressure_scale(0.0) - 0.25).abs() < 1e-9 && (p.pressure_scale(1.0) - 1.0).abs() < 1e-9);
+        assert!((p.pressure_scale(0.5) - (0.25 + 0.75 * 0.5)).abs() < 1e-9, "0.5 is linear");
+        let mid = p.pressure_scale(0.3);
+        p.pressure_sensitivity = 1.0;
+        assert!(p.pressure_scale(0.3) > mid, "more sensitive: a light touch draws wider");
+        p.pressure_sensitivity = 0.0;
+        assert!(p.pressure_scale(0.3) < mid, "less sensitive: it takes a firmer press");
+        p.pressure_min = 0.6;
+        assert!((p.pressure_scale(0.0) - 0.6).abs() < 1e-6);
+        // Monotonic, bounded, total.
+        for s in [0.0, 0.3, 0.5, 1.0, f32::NAN, 9.0] {
+            p.pressure_sensitivity = s;
+            let mut last = 0.0;
+            for i in 0..=20 {
+                let v = p.pressure_scale(i as f32 / 20.0);
+                assert!(v >= last - 1e-12 && (0.0..=1.0).contains(&v), "{s}: {v}");
+                last = v;
+            }
+            assert!(p.pressure_scale(f32::NAN).is_finite());
+        }
+        p.pressure_min = f32::NAN;
+        assert!((p.pressure_scale(0.0) - 0.25).abs() < 1e-9);
+    }
+
     #[test]
     fn only_long_nearly_straight_strokes_straighten() {
         let id = |q: [f64; 2]| egui::pos2(q[0] as f32, q[1] as f32);

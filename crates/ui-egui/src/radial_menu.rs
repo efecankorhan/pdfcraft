@@ -455,6 +455,45 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                                 v.comments.cancelled_drag = true;
                             }
                         }
+                        // Pressure: how readily it widens the stroke, and how thin the lightest
+                        // touch draws, with a stroke that tapers from light to firm to show it.
+                        if app.comment_prefs.pressure && style_tool == CommentTool::Ink {
+                            ui.separator();
+                            let mut sens = (app.comment_prefs.pressure_sensitivity * 100.0).round();
+                            if ui
+                                .add(egui::Slider::new(&mut sens, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text(tl!("Sensitivity")))
+                                .changed()
+                            {
+                                app.comment_prefs.pressure_sensitivity = sens / 100.0;
+                            }
+                            let mut min = (app.comment_prefs.pressure_min * 100.0).round();
+                            if ui
+                                .add(egui::Slider::new(&mut min, 5.0..=90.0).step_by(5.0).fixed_decimals(0).suffix("%").text(tl!("Minimum")))
+                                .changed()
+                            {
+                                app.comment_prefs.pressure_min = min / 100.0;
+                            }
+                            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(260.0), 26.0), egui::Sense::hover());
+                            // On paper, so dark inks show as they will on the page.
+                            ui.painter().rect_filled(rect, egui::CornerRadius::same(6), Color32::from_gray(246));
+                            let full = (current_style.width as f32 * 1.6).clamp(2.0, 20.0);
+                            let colour = color32(current_style.color).gamma_multiply(current_style.opacity.clamp(0.1, 1.0) as f32);
+                            let n = 40;
+                            let pts: Vec<(Pos2, f32)> = (0..=n)
+                                .map(|i| {
+                                    let u = i as f32 / n as f32;
+                                    let x = rect.left() + 8.0 + u * (rect.width() - 16.0);
+                                    let y = rect.center().y + (u * std::f32::consts::TAU).sin() * 4.0;
+                                    (egui::pos2(x, y), app.comment_prefs.pressure_scale(u) as f32 * full)
+                                })
+                                .collect();
+                            for w in pts.windows(2) {
+                                if let [(a, wa), (b, wb)] = w {
+                                    ui.painter().line_segment([*a, *b], Stroke::new((wa + wb) * 0.5, colour));
+                                    ui.painter().circle_filled(*b, wb * 0.5, colour);
+                                }
+                            }
+                        }
                         // A selected comment gets the new style once, when the drag ends (one undo step).
                         let done = |r: &egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
                         if done(&w) {
