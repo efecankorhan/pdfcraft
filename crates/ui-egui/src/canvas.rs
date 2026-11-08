@@ -920,6 +920,11 @@ impl DocView {
         !self.last_queue.is_empty() || self.text_background.pending() || self.move_background.pending()
     }
 
+    /// How many tiles of `page` are out of date and still shown until replaced (diagnostics and tests).
+    pub fn stale_tile_count(&self, page: usize) -> usize {
+        self.stale_tiles.iter().filter(|k| k.0 == page).count()
+    }
+
     /// The cached tile keys of a page, as (scale tag, tile x, tile y) (diagnostics and tests).
     pub fn tiles_debug(&self, page: usize) -> Vec<(u64, u32, u32)> {
         let mut k: Vec<(u64, u32, u32)> = self.tiles.keys().filter(|key| key.0 == page).map(|key| (key.1, key.2, key.3)).collect();
@@ -1832,10 +1837,13 @@ impl DocView {
             self.pages.insert(page, PageTex { tag: r.request.tag, tex });
             self.signature_drag.page_received(page);
             self.move_background.page_received(page);
-            self.comments.page_rendered(page);
             self.waiting_since.remove(&page);
+            // Under out-of-date tiles this raster is only the backdrop: the tiles on top still
+            // lack the new drawing, so it stays painted from its points until they are replaced
+            // (zoomed in, a stroke vanished for a moment and came back).
             if !self.stale_tiles.iter().any(|k| k.0 == page) {
                 self.forms.unbaked.retain(|(_, p)| *p != page);
+                self.comments.page_rendered(page);
             }
         }
         bytes

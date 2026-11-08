@@ -2071,3 +2071,42 @@ fn ctrl_wheel_zooms_with_any_tool() {
         assert!(comments(&h).is_empty(), "{tool}: zooming draws nothing");
     }
 }
+
+/// Zoomed in far enough that the page is drawn in tiles, a released stroke stays painted until
+/// the tiles on top of the page carry it: the low-res backdrop arriving first used to drop it
+/// while the old tiles still covered it, so the stroke vanished and came back.
+#[test]
+fn a_stroke_zoomed_in_stays_drawn_until_its_tiles_are_redrawn() {
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    h.state_mut().set_option("zoom", "1600").unwrap();
+    settle(&mut h);
+    for _ in 0..40 {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let r = h.state().views[0].viewport_rect();
+    assert!(!h.state().views[0].tiles_debug(0).is_empty(), "the page is drawn in tiles at this zoom");
+    let (a, b) = (r.center() - egui::vec2(80.0, 0.0), r.center() + egui::vec2(80.0, 30.0));
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=8 {
+        h.event(egui::Event::PointerMoved(a + (b - a) * (k as f32 / 8.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    assert_eq!(comments(&h).len(), 1);
+    let mut gone = false;
+    for _ in 0..400 {
+        h.step();
+        let v = &h.state().views[0];
+        if v.comments.settling_len() == 0 {
+            assert_eq!(v.stale_tile_count(0), 0, "the stroke stopped being painted while old tiles still covered it");
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(gone, "the tiles were redrawn and the stroke handed over to them");
+}
