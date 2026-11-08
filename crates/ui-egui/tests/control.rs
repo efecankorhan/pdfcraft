@@ -1688,11 +1688,11 @@ fn middle_drag(h: &mut Harness<'static, PdfCraftApp>, from: egui::Pos2, by: egui
 }
 
 /// Ctrl (⌘) with a middle-button drag zooms: up zooms in, down out, about where the drag began;
-/// Alt locks the pan to up and down; a plain middle drag still pans every way. Not on Linux,
-/// where the middle button latches auto-scroll.
+/// with Alt it scrolls on by itself, faster the farther the pointer is, until released; a plain
+/// middle drag still pans every way. Not on Linux, where the middle button latches auto-scroll.
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn ctrl_middle_drag_zooms_and_alt_middle_drag_pans_only_vertically() {
+fn ctrl_middle_drag_zooms_and_alt_middle_drag_scrolls() {
     let (mut h, _c) = harness();
     h.state_mut().set_option("zoom", "200").unwrap();
     h.run_steps(3);
@@ -1711,18 +1711,45 @@ fn ctrl_middle_drag_zooms_and_alt_middle_drag_pans_only_vertically() {
     middle_drag(&mut h, p, egui::vec2(0.0, 100.0), 10, egui::Modifiers::COMMAND);
     assert!((h.state().views[0].zoom / z0 - 1.0).abs() < 0.05, "and back down undoes it");
 
-    // Alt: a diagonal drag moves the page up only. Zoomed in past the window's width, so the
-    // page could move sideways too.
+    // Alt: scrolling, not dragging. Zoomed in past the window's width, so the page could move
+    // sideways too, and on page 2 of 5, so it can scroll both ways.
     h.state_mut().set_option("zoom", "600").unwrap();
     h.run_steps(3);
     h.state_mut().views[0].go_to_page(1);
     h.run_steps(3);
     assert!(page(&h).width() > h.state().views[0].viewport_rect().width(), "the page is wider than the view");
-    let before = page(&h);
-    middle_drag(&mut h, p, egui::vec2(-40.0, -60.0), 10, egui::Modifiers::ALT);
-    let after = page(&h);
-    assert!((after.left() - before.left()).abs() < 0.5, "no sideways motion with Alt: {} → {}", before.left(), after.left());
-    assert!((after.top() - (before.top() - 60.0)).abs() < 1.0, "it follows the pointer up: {} → {}", before.top(), after.top());
+    let start = page(&h);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+    h.event(egui::Event::PointerMoved(p));
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Middle, pressed: true, modifiers: egui::Modifiers::ALT });
+    h.step();
+    // Within the dead zone nothing moves.
+    h.event(egui::Event::PointerMoved(p + egui::vec2(-6.0, 10.0)));
+    h.run_steps(4);
+    assert_eq!(page(&h), start, "the dead zone holds the page still");
+    // Below it, the page scrolls on by itself while the pointer rests, never sideways.
+    h.event(egui::Event::PointerMoved(p + egui::vec2(-40.0, 80.0)));
+    h.run_steps(4);
+    let a = page(&h);
+    h.run_steps(4);
+    let b = page(&h);
+    assert!(a.top() < start.top() - 1.0 && b.top() < a.top() - 1.0, "it keeps scrolling down: {} → {} → {}", start.top(), a.top(), b.top());
+    assert!((b.left() - start.left()).abs() < 0.5, "no sideways motion with Alt: {} → {}", start.left(), b.left());
+    // Farther away, faster.
+    h.event(egui::Event::PointerMoved(p + egui::vec2(-40.0, 160.0)));
+    h.run_steps(1);
+    let c = page(&h);
+    h.run_steps(4);
+    let d = page(&h);
+    assert!(c.top() - d.top() > a.top() - b.top(), "faster farther away: {} vs {}", c.top() - d.top(), a.top() - b.top());
+    // Letting go stops it.
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Middle, pressed: false, modifiers: egui::Modifiers::ALT });
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(3);
+    let stopped = page(&h);
+    h.run_steps(6);
+    assert_eq!(page(&h), stopped, "it stops when the button is released");
+    assert!(!h.state().views[0].middle_panning());
 
     // Plain: both ways, as before.
     let before = page(&h);
