@@ -1703,3 +1703,103 @@ fn radial_wheel_pen_modes_keep_their_own_styles() {
     assert_eq!(mode(&h), None);
     assert_eq!(comments(&h).len(), 1, "no wheel click drew on the page");
 }
+
+/// Settings from before pen modes kept only the Ink tool's style, which was the highlighter's
+/// when that was last used: restored as the pen's, the pen wrote wide and translucent. It now
+/// goes to the highlighter and the pen keeps its opaque default.
+#[test]
+fn old_settings_with_a_translucent_ink_style_keep_the_pen_opaque() {
+    use pdfcraft_ui_egui::comments::{CommentTool, PenMode};
+    let mut a = PdfCraftApp::new();
+    a.restore(r#"{"comment_styles":[{"tool":"comment.ink","color":[0,0,0],"opacity":0.4,"width":10}]}"#);
+    assert_eq!(a.comment_prefs.pen_mode(), PenMode::Pen);
+    let ink = a.comment_prefs.style(CommentTool::Ink);
+    assert_eq!((ink.opacity, ink.width), (1.0, 2.0), "the pen is opaque and fine");
+    let hl = a.comment_prefs.pen_style(PenMode::Highlighter);
+    assert_eq!((hl.color, hl.width, hl.opacity), ([0.0, 0.0, 0.0], 10.0, 0.4), "the old style is the highlighter's");
+    // An opaque legacy Ink style stays the pen's.
+    let mut b = PdfCraftApp::new();
+    b.restore(r#"{"comment_styles":[{"tool":"comment.ink","color":[1,0,0],"opacity":1,"width":4}]}"#);
+    let ink = b.comment_prefs.style(CommentTool::Ink);
+    assert_eq!((ink.color, ink.width, ink.opacity), ([1.0, 0.0, 0.0], 4.0, 1.0));
+}
+
+/// Each pen mode's style, the current mode and the wheel's palette survive a restart; hostile
+/// values are clamped or ignored.
+#[test]
+fn pen_modes_and_the_palette_survive_a_restart() {
+    use pdfcraft_ui_egui::comments::{CommentTool, PenMode};
+    let mut a = PdfCraftApp::new();
+    a.comment_prefs.activate_pen_mode(PenMode::Marker);
+    a.comment_prefs.set_color(CommentTool::Ink, [0.18, 0.62, 0.36]);
+    a.comment_prefs.set_width(CommentTool::Ink, 7.0);
+    a.comment_prefs.activate_freehand_highlighter();
+    a.comment_prefs.radial_palette[2] = [0.1, 0.2, 0.3];
+    let mut b = PdfCraftApp::new();
+    b.restore(&a.persist());
+    assert_eq!(b.comment_prefs.pen_mode(), PenMode::Highlighter);
+    assert_eq!(b.comment_prefs.style(CommentTool::Ink).opacity, 0.4, "the Ink tool has the current mode's style");
+    let m = b.comment_prefs.pen_style(PenMode::Marker);
+    assert_eq!((m.color, m.width, m.opacity), ([0.18, 0.62, 0.36], 7.0, 1.0));
+    assert_eq!(b.comment_prefs.radial_palette[2], [0.1, 0.2, 0.3]);
+    b.comment_prefs.activate_pen();
+    assert_eq!(b.comment_prefs.style(CommentTool::Ink).opacity, 1.0);
+
+    let mut c = PdfCraftApp::new();
+    c.restore(
+        r#"{"pen_mode":"nonsense","pen_styles":[
+            {"mode":"pen","color":[0,0,0],"width":99,"opacity":-1},
+            {"mode":"pencil","color":"grey","width":1,"opacity":1},
+            {"mode":"bogus","color":[0,0,0],"width":1,"opacity":1}
+        ],"radial_palette":[[2,-1,0.5],"red"]}"#,
+    );
+    assert_eq!(c.comment_prefs.pen_mode(), PenMode::Pen, "an unknown mode falls back to the pen");
+    let ink = c.comment_prefs.style(CommentTool::Ink);
+    assert_eq!((ink.width, ink.opacity), (16.0, 0.1), "clamped");
+    assert_eq!(c.comment_prefs.pen_style(PenMode::Pencil).width, 1.0, "a malformed entry keeps the default");
+    assert_eq!(c.comment_prefs.radial_palette[0], [1.0, 0.0, 0.5]);
+}
+
+/// A fast stroke delivers several pointer moves in one frame; every one becomes a point, so a
+/// quick V is drawn as a V and not as a straight chord between frames.
+#[test]
+fn a_fast_pen_stroke_keeps_every_pointer_move_in_a_frame() {
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    let (a, b, mid, end) = (at(&h, 40.0, 100.0), at(&h, 45.0, 100.0), at(&h, 90.0, 40.0), at(&h, 140.0, 100.0));
+    h.event(egui::Event::PointerMoved(a));
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    // Both moves in one frame (`event` would give each its own frame), as a fast pen delivers them.
+    h.input_mut().events.extend([egui::Event::PointerMoved(mid), egui::Event::PointerMoved(end)]);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    let c = comments(&h);
+    assert_eq!(c.len(), 1, "{c:?}");
+    let r = c[0].rect;
+    // The V's tip (page y = 40) is inside the stroke's box, not just the two ends at y = 100.
+    assert!(r[1].min(r[3]) < 80.0, "the stroke passes through the tip: {r:?}");
+}
+
+/// The size card under the wheel sets any width, not just the ring's presets.
+#[test]
+fn the_size_card_sets_any_pen_width() {
+    use pdfcraft_ui_egui::comments::CommentTool;
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    h.state_mut().set_option("panel", "none").unwrap();
+    let p = at(&h, 150.0, 100.0);
+    h.state_mut().views[0].comments.radial_menu =
+        Some(RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode: RadialMode::Thickness, opened_at: 0.0 });
+    h.run_steps(3);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).width, 2.0);
+    // A click in the middle of the 0.5–16 pt slider.
+    h.get_by_role_and_label(egui::accesskit::Role::Slider, "Thickness").click();
+    h.run_steps(3);
+    let w = h.state().comment_prefs.style(CommentTool::Ink).width;
+    assert!((6.0..=10.5).contains(&w), "{w}");
+    assert!(h.state().views[0].comments.radial_menu.is_some(), "the slider keeps the wheel open");
+    assert!(comments(&h).is_empty(), "the click draws nothing on the page");
+}

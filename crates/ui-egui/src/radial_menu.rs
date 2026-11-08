@@ -44,11 +44,11 @@ impl RadialMode {
 }
 
 /// Wheel geometry at full size (logical points from the centre).
-const R_CENTER: f32 = 32.0;
-const R_INNER_IN: f32 = 38.0;
-const R_INNER_OUT: f32 = 68.0;
-const R_OUTER_IN: f32 = 72.0;
-const R_OUTER_OUT: f32 = 126.0;
+const R_CENTER: f32 = 22.0;
+const R_INNER_IN: f32 = 26.0;
+const R_INNER_OUT: f32 = 47.0;
+const R_OUTER_IN: f32 = 50.0;
+const R_OUTER_OUT: f32 = 90.0;
 /// Gap between neighbouring wedges, in radians.
 const GAP: f32 = 0.035;
 const ACCENT: Color32 = Color32::from_rgb(10, 132, 255);
@@ -281,9 +281,9 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 Slot::line(3.0, c, "Normal (3 pt)", (w - 3.0).abs() < 0.5, SlotAction::SetWidth(3.0)),
                 Slot::line(6.0, c, "Thick (6 pt)", (w - 6.0).abs() < 1.0, SlotAction::SetWidth(6.0)),
                 Slot::line(12.0, c, "Marker (12 pt)", (w - 12.0).abs() < 1.5, SlotAction::SetWidth(12.0)),
-                Slot::dot(11.0, c, 1.0, "Opaque (100%)", o >= 0.9, SlotAction::SetOpacity(1.0)),
-                Slot::dot(11.0, c, 0.7, "Semi-Transparent (70%)", (o - 0.7).abs() < 0.15, SlotAction::SetOpacity(0.7)),
-                Slot::dot(11.0, c, 0.4, "Translucent (40%)", o <= 0.5, SlotAction::SetOpacity(0.4)),
+                Slot::dot(8.0, c, 1.0, "Opaque (100%)", o >= 0.9, SlotAction::SetOpacity(1.0)),
+                Slot::dot(8.0, c, 0.7, "Semi-Transparent (70%)", (o - 0.7).abs() < 0.15, SlotAction::SetOpacity(0.7)),
+                Slot::dot(8.0, c, 0.4, "Translucent (40%)", o <= 0.5, SlotAction::SetOpacity(0.4)),
             ]
         }
         RadialMode::FontSize => {
@@ -378,6 +378,56 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
         return;
     }
 
+    // Size & opacity: any width or opacity, not just the presets on the ring.
+    if menu.mode == RadialMode::Thickness {
+        let below = center.y + R_OUTER_OUT * scale + 12.0 + 110.0 < avail.bottom();
+        let (pivot, card_pos) = if below {
+            (egui::Align2::CENTER_TOP, center + vec2(0.0, R_OUTER_OUT * scale + 10.0))
+        } else {
+            (egui::Align2::CENTER_BOTTOM, center - vec2(0.0, R_OUTER_OUT * scale + 36.0))
+        };
+        let card = egui::Area::new(egui::Id::new(("radial-size-card", view_id)))
+            .order(egui::Order::Tooltip)
+            .pivot(pivot)
+            .fixed_pos(card_pos)
+            .constrain_to(avail)
+            .show(ui.ctx(), |ui| {
+                *ui.visuals_mut() = egui::Visuals::dark();
+                egui::Frame::popup(ui.style())
+                    .corner_radius(12)
+                    .fill(Color32::from_rgb(28, 28, 31))
+                    .stroke(Stroke::new(1.0, Color32::from_white_alpha(40)))
+                    .inner_margin(10.0)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().slider_width = 150.0;
+                        let mut width = current_style.width;
+                        let w = ui.add(egui::Slider::new(&mut width, 0.5..=16.0).step_by(0.25).suffix(" pt").text(tl!("Thickness")));
+                        let mut pct = (current_style.opacity * 100.0).round();
+                        let o = ui.add(egui::Slider::new(&mut pct, 10.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").text(tl!("Opacity")));
+                        if w.changed() {
+                            app.comment_prefs.set_width(style_tool, width);
+                        }
+                        if o.changed() {
+                            app.comment_prefs.set_opacity(style_tool, pct / 100.0);
+                        }
+                        if w.changed() || o.changed() {
+                            if !matches!(app.quick_tool, QuickTool::Comment(t) if t != CommentTool::Eraser) {
+                                app.quick_tool = QuickTool::Comment(style_tool);
+                            }
+                            if let Some(v) = app.views.get_mut(view_index) {
+                                v.comments.cancelled_drag = true;
+                            }
+                        }
+                        // A selected comment gets the new style once, when the drag ends (one undo step).
+                        let done = |r: &egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
+                        if done(&w) || done(&o) {
+                            apply_style_to_selected(app, style_tool);
+                        }
+                    });
+            });
+        picker_rect = Some(card.response.rect);
+    }
+
     let mut action: Option<SlotAction> = None;
     let mut center_clicked = false;
     let mut close = false;
@@ -430,13 +480,13 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 let pos = center + vec2(mid.cos(), mid.sin()) * (ring_in + r_out - 3.0) * 0.5;
                 paint_slot(ui, &painter, slot, pos, scale, t, is_hovered);
                 if let Some(c) = slot.mark {
-                    let at = center + vec2(mid.cos(), mid.sin()) * (ring_in + 9.0 * scale);
-                    painter.circle_filled(at, 3.5 * scale, color32(c).gamma_multiply(t));
-                    painter.circle_stroke(at, 3.5 * scale, Stroke::new(1.0, Color32::from_white_alpha(a(90.0))));
+                    let at = center + vec2(mid.cos(), mid.sin()) * (ring_in + 6.5 * scale);
+                    painter.circle_filled(at, 2.8 * scale, color32(c).gamma_multiply(t));
+                    painter.circle_stroke(at, 2.8 * scale, Stroke::new(1.0, Color32::from_white_alpha(a(90.0))));
                 }
                 // An accessibility node per wedge: screen readers and UI tests find slots by name.
                 let id = ui.id().with(("radial-slot", k));
-                let r = ui.interact(Rect::from_center_size(pos, Vec2::splat(26.0 * scale)), id, egui::Sense::hover());
+                let r = ui.interact(Rect::from_center_size(pos, Vec2::splat(20.0 * scale)), id, egui::Sense::hover());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!(slot.label)));
             }
 
@@ -455,7 +505,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 }
                 let pos = center + vec2(mid.cos(), mid.sin()) * (r0 + r1) * 0.5;
                 let id = ui.id().with(("radial-swatch", k));
-                let r = ui.interact(Rect::from_center_size(pos, Vec2::splat(20.0 * scale)), id, egui::Sense::hover());
+                let r = ui.interact(Rect::from_center_size(pos, Vec2::splat(14.0 * scale)), id, egui::Sense::hover());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!(slot.label)));
             }
 
@@ -465,7 +515,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             painter.circle_filled(center, rc, Color32::from_rgba_unmultiplied(38, 38, 42, a(if center_hovered { 255.0 } else { 235.0 })));
             painter.circle_stroke(center, rc, Stroke::new(1.0, Color32::from_white_alpha(a(if center_hovered { 70.0 } else { 30.0 }))));
             let center_label = if menu.mode == RadialMode::Tools {
-                let width = (current_style.width as f32 * 1.4).clamp(1.5, 14.0) * scale;
+                let width = (current_style.width as f32 * 1.2).clamp(1.2, 10.0) * scale;
                 let colour = color32(current_style.color).gamma_multiply(t * current_style.opacity.clamp(0.1, 1.0) as f32);
                 let pts: Vec<Pos2> = (0..=24)
                     .map(|i| {
@@ -478,9 +528,9 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             } else {
                 icons::paint(
                     ui,
-                    Rect::from_center_size(center, Vec2::splat(20.0 * scale)),
+                    Rect::from_center_size(center, Vec2::splat(16.0 * scale)),
                     "chevron-left",
-                    20.0 * scale,
+                    16.0 * scale,
                     Color32::from_gray(235).gamma_multiply(t),
                 );
                 "Back"
@@ -499,7 +549,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 && menu.mode != RadialMode::CustomColor
             {
                 let galley = ui.fonts_mut(|f| f.layout_no_wrap(tl!(label).to_string(), crate::theme::semibold(12.0), Color32::WHITE));
-                let pos = center - vec2(0.0, r_out + 20.0);
+                let pos = center - vec2(0.0, r_out + 16.0);
                 let badge = Rect::from_center_size(pos, galley.size() + vec2(18.0, 10.0));
                 painter.rect_filled(badge, egui::CornerRadius::same(12), Color32::from_rgba_unmultiplied(24, 24, 27, a(245.0)));
                 painter.rect_stroke(
@@ -639,28 +689,28 @@ fn paint_slot(ui: &egui::Ui, painter: &egui::Painter, slot: &Slot, pos: Pos2, sc
     let lift = if hovered { 1.12 } else { 1.0 };
     if let Some(w) = slot.line_width {
         let c = slot.color.unwrap_or([1.0, 1.0, 1.0]);
-        let half = 13.0 * scale * lift;
+        let half = 9.0 * scale * lift;
         let pts: Vec<Pos2> = (0..=12)
             .map(|i| {
                 let u = i as f32 / 12.0;
-                pos + vec2((u - 0.5) * 2.0 * half, (u * std::f32::consts::TAU).sin() * 3.0 * scale)
+                pos + vec2((u - 0.5) * 2.0 * half, (u * std::f32::consts::TAU).sin() * 2.0 * scale)
             })
             .collect();
-        painter.add(egui::Shape::line(pts, Stroke::new((w * 1.2).clamp(1.0, 14.0) * scale, color32(c).gamma_multiply(t * slot.alpha))));
+        painter.add(egui::Shape::line(pts, Stroke::new((w * 0.9).clamp(1.0, 10.0) * scale, color32(c).gamma_multiply(t * slot.alpha))));
     } else if let Some(r) = slot.dot_radius {
         let c = slot.color.unwrap_or([1.0, 1.0, 1.0]);
         painter.circle_filled(pos, r * scale * lift, color32(c).gamma_multiply(t * slot.alpha));
         painter.circle_stroke(pos, r * scale * lift, Stroke::new(1.0, Color32::from_white_alpha((120.0 * t) as u8)));
     } else if let Some(c) = slot.color {
-        painter.circle_filled(pos, 10.0 * scale * lift, color32(c).gamma_multiply(t));
+        painter.circle_filled(pos, 7.0 * scale * lift, color32(c).gamma_multiply(t));
         painter.circle_stroke(
             pos,
-            10.0 * scale * lift,
+            7.0 * scale * lift,
             Stroke::new(if slot.active { 2.0 } else { 1.0 }, Color32::from_white_alpha((if slot.active { 230.0 } else { 70.0 } * t) as u8)),
         );
     } else if let Some(icon) = slot.icon {
         let tint = if slot.active { Color32::WHITE.gamma_multiply(t) } else { Color32::from_gray(225).gamma_multiply(t * slot.alpha) };
-        let size = 20.0 * scale * lift;
+        let size = 16.0 * scale * lift;
         icons::paint(ui, Rect::from_center_size(pos, Vec2::splat(size)), icon, size, tint);
     }
 }
@@ -730,9 +780,9 @@ mod tests {
         assert_eq!(wedge_at(vec2(f32::NAN, 0.0), 4), None);
         let c = egui::pos2(200.0, 200.0);
         assert_eq!(hit_test(c, c, 1.0, 8, 13), Some(Hit::Center));
-        assert_eq!(hit_test(c + vec2(0.0, -50.0), c, 1.0, 8, 13), Some(Hit::Inner(0)));
-        assert_eq!(hit_test(c + vec2(0.0, -100.0), c, 1.0, 8, 13), Some(Hit::Outer(0)));
-        assert_eq!(hit_test(c + vec2(0.0, -50.0), c, 1.0, 0, 6), Some(Hit::Outer(0)), "no inner ring: the outer slots reach inwards");
+        assert_eq!(hit_test(c + vec2(0.0, -36.0), c, 1.0, 8, 13), Some(Hit::Inner(0)));
+        assert_eq!(hit_test(c + vec2(0.0, -70.0), c, 1.0, 8, 13), Some(Hit::Outer(0)));
+        assert_eq!(hit_test(c + vec2(0.0, -36.0), c, 1.0, 0, 6), Some(Hit::Outer(0)), "no inner ring: the outer slots reach inwards");
         assert_eq!(hit_test(c + vec2(0.0, -300.0), c, 1.0, 8, 13), None);
         assert_eq!(hit_test(egui::pos2(f32::NAN, 0.0), c, 1.0, 8, 13), None);
     }

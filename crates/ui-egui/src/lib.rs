@@ -2278,6 +2278,15 @@ impl PdfCraftApp {
             "comments_panel_closed": self.comments_panel_closed,
             "right_panel_closed": self.right_panel_closed,
         });
+        // The pen's modes keep their own styles (the Ink tool's style above is the current one's).
+        v["pen_mode"] = serde_json::json!(self.comment_prefs.pen_mode().token());
+        v["pen_styles"] = self
+            .comment_prefs
+            .pen_styles()
+            .map(|(m, s)| serde_json::json!({ "mode": m.token(), "color": s.color, "width": s.width, "opacity": s.opacity }))
+            .collect::<Vec<_>>()
+            .into();
+        v["radial_palette"] = serde_json::json!(self.comment_prefs.radial_palette);
         // Set apart: one more key inside the macro above passes serde_json's recursion limit.
         v["redact_prefs"] = self.redact_defaults.to_json();
         // Set outside json! above, which is at serde_json's macro recursion limit.
@@ -2411,6 +2420,27 @@ impl PdfCraftApp {
                     let mut s = self.comment_prefs.style(tool);
                     s.fill = fill;
                     self.comment_prefs.set_style(tool, s);
+                }
+            }
+        }
+        // Pen modes after the per-tool styles, so the Ink tool ends up with the current mode's
+        // style. Older settings have none: a translucent Ink style there was the highlighter's.
+        if let Some(pens) = v["pen_styles"].as_array() {
+            for e in pens {
+                let Some(mode) = e["mode"].as_str().and_then(crate::comments::PenMode::from_token) else { continue };
+                if let (Some(c), Some(w), Some(o)) = (rgb_triple(&e["color"]), e["width"].as_f64(), e["opacity"].as_f64()) {
+                    self.comment_prefs.restore_pen_style(mode, c, w, o);
+                }
+            }
+            let mode = v["pen_mode"].as_str().and_then(crate::comments::PenMode::from_token).unwrap_or_default();
+            self.comment_prefs.restore_pen_mode(mode);
+        } else {
+            self.comment_prefs.adopt_legacy_ink_style();
+        }
+        if let Some(palette) = v["radial_palette"].as_array() {
+            for (slot, c) in self.comment_prefs.radial_palette.iter_mut().zip(palette) {
+                if let Some(c) = rgb_triple(c) {
+                    *slot = c;
                 }
             }
         }

@@ -287,6 +287,20 @@ impl PenMode {
         }
     }
 
+    /// The settings-file name of the mode.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Pen => "pen",
+            Self::Pencil => "pencil",
+            Self::Marker => "marker",
+            Self::Highlighter => "highlighter",
+        }
+    }
+
+    pub fn from_token(t: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.token() == t)
+    }
+
     fn slot(self) -> usize {
         match self {
             Self::Pen => 0,
@@ -414,6 +428,52 @@ impl CommentPrefs {
         if let Some(slot) = self.pen_styles.get_mut(self.pen_mode.slot()) {
             *slot = PenStyle { color: s.color, width: s.width, opacity: s.opacity };
         }
+    }
+
+    /// Restore a pen mode's saved style from settings (untrusted: clamped, non-finite ignored).
+    /// Call [`Self::restore_pen_mode`] afterwards to load the active one into the Ink tool.
+    pub fn restore_pen_style(&mut self, mode: PenMode, color: Rgb, width: f64, opacity: f64) {
+        if !(color.iter().all(|c| c.is_finite()) && width.is_finite() && opacity.is_finite()) {
+            return;
+        }
+        if let Some(slot) = self.pen_styles.get_mut(mode.slot()) {
+            *slot = PenStyle { color: color.map(|c| c.clamp(0.0, 1.0)), width: width.clamp(0.5, 16.0), opacity: opacity.clamp(0.1, 1.0) };
+        }
+    }
+
+    /// Make `mode` current and give the Ink tool its saved style, without saving the Ink tool's
+    /// style into the old mode first (settings restore it after the per-tool styles).
+    pub fn restore_pen_mode(&mut self, mode: PenMode) {
+        self.pen_mode = mode;
+        let saved = self.saved_pen_style(mode);
+        if let Some((_, s)) = self.styles.iter_mut().find(|(t, _)| *t == CommentTool::Ink) {
+            s.color = saved.color;
+            s.width = saved.width;
+            s.opacity = saved.opacity;
+        }
+    }
+
+    /// Settings written before pen modes stored the Ink tool's style only, which was the
+    /// highlighter's when that was in use: restored as the pen's, the pen drew wide and
+    /// translucent. A translucent legacy Ink style goes to the highlighter; the pen keeps its
+    /// default.
+    pub fn adopt_legacy_ink_style(&mut self) {
+        let s = self.style(CommentTool::Ink);
+        if self.pen_mode == PenMode::Pen && s.opacity < 0.85 {
+            if let Some(slot) = self.pen_styles.get_mut(PenMode::Highlighter.slot()) {
+                *slot = PenStyle { color: s.color, width: s.width, opacity: s.opacity };
+            }
+            let pen = Style::default_for(&CommentTool::Ink.sample());
+            if let Some(slot) = self.pen_styles.get_mut(PenMode::Pen.slot()) {
+                *slot = PenMode::Pen.default_style((pen.color, pen.width));
+            }
+            self.restore_pen_mode(PenMode::Pen);
+        }
+    }
+
+    /// Every pen mode with its style (the current mode's is the Ink tool's), for settings.
+    pub fn pen_styles(&self) -> impl Iterator<Item = (PenMode, PenStyle)> + '_ {
+        PenMode::ALL.into_iter().map(|m| (m, self.pen_style(m)))
     }
 
     /// Every tool with its current default style (the persisted settings read this).
@@ -1011,9 +1071,20 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     }
                     cv.last_eraser_pos = Some((cx.page, p));
                 } else if *tool == CommentTool::Ink {
-                    let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(p);
-                    if last.distance(p) >= 2.0 {
-                        points.push(u);
+                    // Every pointer move this frame, not just the last one: a fast stroke gets
+                    // all the pen's samples instead of straight chords between frames.
+                    let moves: Vec<egui::Pos2> =
+                        ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::PointerMoved(m) = e { Some(*m) } else { None }).collect());
+                    let samples = if moves.is_empty() { vec![p] } else { moves };
+                    for m in samples {
+                        if points.len() >= MAX_INK_POINTS {
+                            break;
+                        }
+                        let m = clamp_to(page_rect, m);
+                        let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(m);
+                        if last.distance(m) >= INK_MIN_STEP {
+                            points.push(cx.to_user(m));
+                        }
                     }
                 } else {
                     points.truncate(1);
@@ -1750,29 +1821,31 @@ fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, poin
 }
 
 /// The shape a finished drawing gesture makes (`None` if it is too small to mean anything).
+/// Pen samples closer than this (screen points) are skipped: pixel-step jitter, not shape.
+const INK_MIN_STEP: f32 = 1.25;
+/// Points one stroke may hold (an hour of scribbling is far less); bounds memory for a stuck button.
+const MAX_INK_POINTS: usize = 20_000;
+
+/// Smooth a pen stroke: one pass of a [1/4, 1/2, 1/4] filter takes out the stair-steps of
+/// integer pointer positions while keeping corners readable and both ends where the pen went
+/// down and up.
+fn smooth_stroke(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let mut out = points.to_vec();
+    for (i, w) in points.windows(3).enumerate() {
+        if let (Some(o), [a, b, c]) = (out.get_mut(i + 1), w) {
+            *o = [0.25 * a[0] + 0.5 * b[0] + 0.25 * c[0], 0.25 * a[1] + 0.5 * b[1] + 0.25 * c[1]];
+        }
+    }
+    out
+}
+
 fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
     let (first, last) = (*points.first()?, *points.last()?);
     let far = (first[0] - last[0]).hypot(first[1] - last[1]) >= 2.0;
     let rect = [first[0].min(last[0]), first[1].min(last[1]), first[0].max(last[0]), first[1].max(last[1])];
     let big = rect[2] - rect[0] >= 2.0 && rect[3] - rect[1] >= 2.0;
     match tool {
-        CommentTool::Ink if !points.is_empty() => {
-            let smoothed = if points.len() >= 3 {
-                let mut s = Vec::with_capacity(points.len());
-                s.push(points[0]);
-                for i in 1..points.len() - 1 {
-                    let p_prev = points[i - 1];
-                    let p_curr = points[i];
-                    let p_next = points[i + 1];
-                    s.push([0.2 * p_prev[0] + 0.6 * p_curr[0] + 0.2 * p_next[0], 0.2 * p_prev[1] + 0.6 * p_curr[1] + 0.2 * p_next[1]]);
-                }
-                s.push(points[points.len() - 1]);
-                s
-            } else {
-                points.to_vec()
-            };
-            Some(Shape::Ink { strokes: vec![smoothed] })
-        }
+        CommentTool::Ink if !points.is_empty() => Some(Shape::Ink { strokes: vec![smooth_stroke(points)] }),
         CommentTool::Line | CommentTool::Arrow if far => Some(Shape::Line {
             from: first,
             to: last,
