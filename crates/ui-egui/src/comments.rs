@@ -248,8 +248,9 @@ pub enum PenMode {
     /// Opaque everyday pen.
     #[default]
     Pen,
-    /// Fine, slightly translucent graphite line for sketches and margin notes.
-    Pencil,
+    /// Broad-nib fountain pen: the nib is held at a fixed angle, so strokes are thick or thin
+    /// by direction, as in calligraphy.
+    Fountain,
     /// Thick opaque felt-tip.
     Marker,
     /// Wide translucent stroke for marking over text.
@@ -257,12 +258,12 @@ pub enum PenMode {
 }
 
 impl PenMode {
-    pub const ALL: [PenMode; 4] = [PenMode::Pen, PenMode::Pencil, PenMode::Marker, PenMode::Highlighter];
+    pub const ALL: [PenMode; 4] = [PenMode::Pen, PenMode::Fountain, PenMode::Marker, PenMode::Highlighter];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Pen => "Pen",
-            Self::Pencil => "Pencil",
+            Self::Fountain => "Fountain pen",
             Self::Marker => "Marker",
             Self::Highlighter => "Highlighter",
         }
@@ -270,8 +271,8 @@ impl PenMode {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Pen => "pen-tool",
-            Self::Pencil => "pencil",
+            Self::Pen => "pen-line",
+            Self::Fountain => "pen-tool",
             Self::Marker => "brush",
             Self::Highlighter => "highlighter",
         }
@@ -281,7 +282,7 @@ impl PenMode {
     fn default_style(self, pen: (Rgb, f64)) -> PenStyle {
         match self {
             Self::Pen => PenStyle { color: pen.0, width: pen.1, opacity: 1.0 },
-            Self::Pencil => PenStyle { color: [0.25, 0.25, 0.27], width: 1.0, opacity: 0.8 },
+            Self::Fountain => PenStyle { color: [0.07, 0.16, 0.42], width: 3.5, opacity: 1.0 },
             Self::Marker => PenStyle { color: [0.89, 0.13, 0.13], width: 6.0, opacity: 1.0 },
             Self::Highlighter => PenStyle { color: [1.0, 0.94, 0.0], width: 10.0, opacity: 0.4 },
         }
@@ -291,7 +292,7 @@ impl PenMode {
     pub fn token(self) -> &'static str {
         match self {
             Self::Pen => "pen",
-            Self::Pencil => "pencil",
+            Self::Fountain => "fountain",
             Self::Marker => "marker",
             Self::Highlighter => "highlighter",
         }
@@ -304,7 +305,7 @@ impl PenMode {
     fn slot(self) -> usize {
         match self {
             Self::Pen => 0,
-            Self::Pencil => 1,
+            Self::Fountain => 1,
             Self::Marker => 2,
             Self::Highlighter => 3,
         }
@@ -490,6 +491,21 @@ impl CommentPrefs {
         }
         if tool == CommentTool::Ink {
             self.save_pen_style();
+        }
+    }
+
+    /// Swap two colours of the wheel's palette (dragging one onto another). The selected slot
+    /// follows its colour. Out-of-range slots change nothing.
+    pub fn swap_palette(&mut self, a: usize, b: usize) {
+        let n = self.radial_palette.len();
+        if a >= n || b >= n || a == b {
+            return;
+        }
+        self.radial_palette.swap(a, b);
+        if self.selected_palette_slot == a {
+            self.selected_palette_slot = b;
+        } else if self.selected_palette_slot == b {
+            self.selected_palette_slot = a;
         }
     }
 
@@ -1766,6 +1782,21 @@ fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, poin
         let stroke = Stroke::new((style.width as f32 * zoom).max(1.0), color);
         let pts: Vec<Pos2> = points.iter().map(|p| cx.to_screen(*p)).collect();
         match tool {
+            CommentTool::Ink if cx.prefs.pen_mode() == PenMode::Fountain && !pts.is_empty() => {
+                // The same hairlines the comment will have, in screen space (y down).
+                let nib = fountain_nib(style.width);
+                let hair = Stroke::new((nib.hairline as f32 * zoom).max(1.0), stroke.color);
+                let smooth = smooth_polyline(&pts);
+                for o in &nib.offsets {
+                    let d = vec2(o[0] as f32, -(o[1] as f32)) * zoom;
+                    let line: Vec<Pos2> = smooth.iter().map(|p| *p + d).collect();
+                    if let [only] = line.as_slice() {
+                        painter.circle_filled(*only, (hair.width * 0.5).max(0.75), hair.color);
+                    } else {
+                        painter.add(egui::Shape::line(line, hair));
+                    }
+                }
+            }
             CommentTool::Ink => {
                 if pts.len() == 1 {
                     painter.circle_filled(pts[0], (stroke.width * 0.5).max(1.0), stroke.color);
@@ -1936,7 +1967,55 @@ fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
 }
 
 fn new_comment(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, contents: String) -> Edit {
-    Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style: cx.prefs.style(tool), contents, author: cx.prefs.author.clone() })
+    let mut style = cx.prefs.style(tool);
+    // The fountain pen's nib is drawn as parallel hairlines (see `fountain_nib`).
+    let shape = match shape {
+        Shape::Ink { strokes } if tool == CommentTool::Ink && cx.prefs.pen_mode() == PenMode::Fountain => {
+            let nib = fountain_nib(style.width);
+            style.width = nib.hairline;
+            Shape::Ink { strokes: strokes.iter().flat_map(|s| nib.strokes(s)).collect() }
+        }
+        other => other,
+    };
+    Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style, contents, author: cx.prefs.author.clone() })
+}
+
+/// A broad fountain-pen nib held at a fixed angle. PDF ink has one width per drawing, so the
+/// nib is drawn as `count` parallel hairlines spread across its edge: together they sweep the
+/// nib's footprint, thick where the pen moves across the edge and thin where it moves along it.
+/// The result is an ordinary Ink comment every viewer draws, and the Eraser cuts it like any
+/// other drawing.
+pub(crate) struct FountainNib {
+    /// Offset (user space, y up) from the stroke to each hairline.
+    offsets: Vec<[f64; 2]>,
+    /// Width of each hairline, in points.
+    pub(crate) hairline: f64,
+}
+
+/// The nib edge's angle: rising 35° to the right on the page, as a right-handed writer holds an
+/// italic nib.
+const NIB_ANGLE_DEG: f64 = 35.0;
+
+pub(crate) fn fountain_nib(width: f64) -> FountainNib {
+    let edge = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
+    let hairline = (edge * 0.28).max(0.5);
+    // Hairlines overlap by half their width, so the swept area has no gaps.
+    let count = ((edge / (hairline * 0.5)).ceil() as usize + 1).clamp(2, 16);
+    let (s, c) = NIB_ANGLE_DEG.to_radians().sin_cos();
+    let offsets = (0..count)
+        .map(|i| {
+            let u = i as f64 / (count - 1) as f64 - 0.5;
+            [c * edge * u, s * edge * u]
+        })
+        .collect();
+    FountainNib { offsets, hairline }
+}
+
+impl FountainNib {
+    /// The hairlines one stroke becomes.
+    pub(crate) fn strokes(&self, stroke: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
+        self.offsets.iter().map(|o| stroke.iter().map(|p| [p[0] + o[0], p[1] + o[1]]).collect()).collect()
+    }
 }
 
 /// The floating composer card (new note, new text box, edit). Returns the edit to apply.
@@ -2588,6 +2667,30 @@ pub fn status_badge(state: &str) -> Option<(&'static str, &'static str, Color32)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_fountain_nib_is_wide_across_its_edge_and_thin_along_it() {
+        for edge in [0.5, 3.5, 8.0, 16.0, 1e9, f64::NAN] {
+            let nib = super::fountain_nib(edge);
+            let e = if edge.is_finite() { edge.clamp(0.5, 16.0) } else { 3.0 };
+            let (s, c) = super::NIB_ANGLE_DEG.to_radians().sin_cos();
+            // Spread of the hairlines across a stroke going in direction (dx, dy).
+            let spread = |dx: f64, dy: f64| {
+                let d: Vec<f64> = nib.offsets.iter().map(|o| o[0] * -dy + o[1] * dx).collect();
+                d.iter().cloned().fold(f64::MIN, f64::max) - d.iter().cloned().fold(f64::MAX, f64::min)
+            };
+            assert!(spread(c, s).abs() < 1e-9, "along the edge: no width ({edge})");
+            assert!((spread(-s, c) - e).abs() < 1e-9, "across the edge: the full nib ({edge})");
+            // Neighbouring hairlines overlap, so the swept nib has no gaps.
+            let gap = e / (nib.offsets.len() - 1) as f64;
+            assert!(gap <= nib.hairline, "{edge}: gap {gap} > hairline {}", nib.hairline);
+            assert!((2..=16).contains(&nib.offsets.len()));
+        }
+        let stroke = [[0.0, 0.0], [10.0, 0.0]];
+        let nib = super::fountain_nib(4.0);
+        assert_eq!(nib.strokes(&stroke).len(), nib.offsets.len());
+        assert!(nib.strokes(&[]).iter().all(Vec::is_empty));
+    }
+
     use super::*;
     use pdfcraft_render::TextGlyph;
 

@@ -1656,11 +1656,11 @@ fn radial_wheel_pen_modes_keep_their_own_styles() {
     let mode = |h: &Harness<'static, PdfCraftApp>| h.state().views[0].comments.radial_menu.as_ref().map(|r| r.mode);
 
     open(&mut h);
-    h.get_by_label("Pencil").click();
+    h.get_by_label("Fountain pen").click();
     h.run_steps(3);
     assert_eq!(mode(&h), None, "picking a pen closes the wheel");
-    assert_eq!(h.state().comment_prefs.pen_mode(), PenMode::Pencil);
-    assert_eq!((ink(&h).width, ink(&h).opacity), (1.0, 0.8));
+    assert_eq!(h.state().comment_prefs.pen_mode(), PenMode::Fountain);
+    assert_eq!((ink(&h).width, ink(&h).opacity), (3.5, 1.0));
     assert!(comments(&h).is_empty(), "the click on the wheel draws nothing on the page");
 
     open(&mut h);
@@ -1680,11 +1680,11 @@ fn radial_wheel_pen_modes_keep_their_own_styles() {
     assert_eq!(c[0].subtype, "Ink");
     assert_eq!(c[0].color, Some([0.18, 0.62, 0.36]));
 
-    // Back to the pencil: its own grey and width return; the marker keeps its green.
+    // Back to the fountain pen: its own ink and nib return; the marker keeps its green.
     open(&mut h);
-    h.get_by_label("Pencil").click();
+    h.get_by_label("Fountain pen").click();
     h.run_steps(3);
-    assert_eq!((ink(&h).color, ink(&h).width), ([0.25, 0.25, 0.27], 1.0));
+    assert_eq!((ink(&h).color, ink(&h).width), ([0.07, 0.16, 0.42], 3.5));
     open(&mut h);
     h.get_by_label("Marker").click();
     h.run_steps(3);
@@ -1749,14 +1749,14 @@ fn pen_modes_and_the_palette_survive_a_restart() {
     c.restore(
         r#"{"pen_mode":"nonsense","pen_styles":[
             {"mode":"pen","color":[0,0,0],"width":99,"opacity":-1},
-            {"mode":"pencil","color":"grey","width":1,"opacity":1},
+            {"mode":"fountain","color":"grey","width":1,"opacity":1},
             {"mode":"bogus","color":[0,0,0],"width":1,"opacity":1}
         ],"radial_palette":[[2,-1,0.5],"red"]}"#,
     );
     assert_eq!(c.comment_prefs.pen_mode(), PenMode::Pen, "an unknown mode falls back to the pen");
     let ink = c.comment_prefs.style(CommentTool::Ink);
     assert_eq!((ink.width, ink.opacity), (16.0, 0.1), "clamped");
-    assert_eq!(c.comment_prefs.pen_style(PenMode::Pencil).width, 1.0, "a malformed entry keeps the default");
+    assert_eq!(c.comment_prefs.pen_style(PenMode::Fountain).width, 3.5, "a malformed entry keeps the default");
     assert_eq!(c.comment_prefs.radial_palette[0], [1.0, 0.0, 0.5]);
 }
 
@@ -1802,4 +1802,87 @@ fn the_size_card_sets_any_pen_width() {
     assert!((6.0..=10.5).contains(&w), "{w}");
     assert!(h.state().views[0].comments.radial_menu.is_some(), "the slider keeps the wheel open");
     assert!(comments(&h).is_empty(), "the click draws nothing on the page");
+}
+
+/// The fountain pen draws a broad nib held at an angle: one Ink comment whose hairlines sweep
+/// the nib, so a stroke across the nib's edge is wide and one along it is thin.
+#[test]
+fn the_fountain_pen_is_thick_or_thin_by_direction() {
+    use pdfcraft_ui_egui::comments::PenMode;
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    h.state_mut().comment_prefs.activate_pen_mode(PenMode::Fountain);
+    h.state_mut().comment_prefs.set_width(pdfcraft_ui_egui::comments::CommentTool::Ink, 8.0);
+    // The nib edge rises 35° to the right: a horizontal stroke is about edge × sin 35° thick,
+    // a vertical one edge × cos 35°.
+    drag_pt(&mut h, (40.0, 60.0), (140.0, 60.0));
+    drag_pt(&mut h, (220.0, 40.0), (220.0, 160.0));
+    let c = comments(&h);
+    assert_eq!(c.len(), 2, "one comment per stroke: {c:?}");
+    assert!(c.iter().all(|a| a.subtype == "Ink"));
+    // Each stroke's thickness is its box's short side (the list order is the page's, not ours).
+    let size = |r: [f32; 4]| ((r[2] - r[0]).abs(), (r[3] - r[1]).abs());
+    let wide = c.iter().map(|a| size(a.rect)).find(|(w, h)| w > h).expect("the horizontal stroke");
+    let tall = c.iter().map(|a| size(a.rect)).find(|(w, h)| h > w).expect("the vertical stroke");
+    let (horizontal, vertical) = (wide.1, tall.0);
+    assert!(vertical > horizontal + 1.0, "down-strokes are wider than cross-strokes: {horizontal} vs {vertical}");
+}
+
+/// Dragging a colour of the wheel's palette onto another swaps them; it does not pick a colour
+/// or close the wheel.
+#[test]
+fn dragging_a_palette_colour_onto_another_swaps_them() {
+    use pdfcraft_ui_egui::comments::CommentTool;
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    h.state_mut().set_option("panel", "none").unwrap();
+    let p = at(&h, 150.0, 100.0);
+    h.state_mut().views[0].comments.radial_menu =
+        Some(RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode: RadialMode::Tools, opened_at: 0.0 });
+    h.run_steps(12);
+    let before = h.state().comment_prefs.radial_palette;
+    let ink_before = h.state().comment_prefs.style(CommentTool::Ink).color;
+    let from = h.get_by_label("Black").rect().center();
+    let to = h.get_by_label("Green").rect().center();
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::PointerMoved(from.lerp(to, 0.5)));
+    h.step();
+    h.event(egui::Event::PointerMoved(to));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    let after = h.state().comment_prefs.radial_palette;
+    assert_eq!((after[0], after[3]), (before[3], before[0]), "black and green trade places");
+    assert_eq!(&after[1..3], &before[1..3]);
+    assert_eq!(h.state().comment_prefs.style(CommentTool::Ink).color, ink_before, "a drag picks no colour");
+    assert!(h.state().views[0].comments.radial_menu.is_some(), "the wheel stays open");
+    assert!(comments(&h).is_empty());
+}
+
+/// A closing wheel fades out but can't be clicked: its slots are gone at once.
+#[test]
+fn a_closing_wheel_has_no_clickable_slots() {
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    // Frames of 1/60 s (the default step is 1/4 s, longer than the whole fade).
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("text.pdf", None, TEXT_FIXTURE.to_vec()).expect("opens");
+        app.set_option("left", "closed").unwrap();
+        app.set_option("quick", "ink").unwrap();
+        app
+    });
+    h.run_steps(4);
+    settle(&mut h);
+    let p = at(&h, 150.0, 100.0);
+    h.state_mut().views[0].comments.radial_menu =
+        Some(RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode: RadialMode::Tools, opened_at: 0.0 });
+    h.run_steps(30);
+    h.get_by_label("Marker").click();
+    // One more frame for the accessibility tree; the fade takes several.
+    h.run_steps(2);
+    assert!(h.state().views[0].comments.radial_menu.is_none());
+    assert!(h.query_by_label("Marker").is_none() && h.query_by_label("Close").is_none(), "no ghost slots while it fades");
+    assert!(comments(&h).is_empty());
 }
