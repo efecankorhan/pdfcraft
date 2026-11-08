@@ -1669,3 +1669,65 @@ fn routine_continuous_scrolling_does_not_add_navigation_history() {
     assert!(h.state().views[0].back.is_empty());
     assert!(h.state().views[0].forward.is_empty());
 }
+
+/// A middle-button drag with `modifiers` held, from `from` by `by` in `steps` frames. Modifiers
+/// are input state in egui (set by `ModifiersChanged`), held through the drag and let go after.
+fn middle_drag(h: &mut Harness<'static, PdfCraftApp>, from: egui::Pos2, by: egui::Vec2, steps: usize, modifiers: egui::Modifiers) {
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Middle, pressed: true, modifiers });
+    h.step();
+    for k in 1..=steps {
+        h.event(egui::Event::PointerMoved(from + by * (k as f32 / steps as f32)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: from + by, button: egui::PointerButton::Middle, pressed: false, modifiers });
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+    h.run_steps(3);
+}
+
+/// Ctrl (⌘) with a middle-button drag zooms: up zooms in, down out, about where the drag began;
+/// Alt locks the pan to up and down; a plain middle drag still pans every way. Not on Linux,
+/// where the middle button latches auto-scroll.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn ctrl_middle_drag_zooms_and_alt_middle_drag_pans_only_vertically() {
+    let (mut h, _c) = harness();
+    h.state_mut().set_option("zoom", "200").unwrap();
+    h.run_steps(3);
+    h.state_mut().views[0].go_to_page(1);
+    h.run_steps(3);
+    let p = h.state().views[0].viewport_rect().center();
+    // What sits under the drag's start, as a fraction of page 2.
+    let page = |h: &Harness<'static, PdfCraftApp>| h.state().views[0].page_screen_rect(1).unwrap();
+    let frac = |r: egui::Rect| ((p.x - r.left()) / r.width(), (p.y - r.top()) / r.height());
+    let (z0, f0) = (h.state().views[0].zoom, frac(page(&h)));
+
+    middle_drag(&mut h, p, egui::vec2(0.0, -100.0), 10, egui::Modifiers::COMMAND);
+    let (z1, f1) = (h.state().views[0].zoom, frac(page(&h)));
+    assert!((z1 / z0 - 2.0).abs() < 0.1, "100 points up doubles the zoom: {z0} → {z1}");
+    assert!((f1.0 - f0.0).abs() < 0.01 && (f1.1 - f0.1).abs() < 0.01, "the point under the drag stays put: {f0:?} → {f1:?}");
+    middle_drag(&mut h, p, egui::vec2(0.0, 100.0), 10, egui::Modifiers::COMMAND);
+    assert!((h.state().views[0].zoom / z0 - 1.0).abs() < 0.05, "and back down undoes it");
+
+    // Alt: a diagonal drag moves the page up only. Zoomed in past the window's width, so the
+    // page could move sideways too.
+    h.state_mut().set_option("zoom", "600").unwrap();
+    h.run_steps(3);
+    h.state_mut().views[0].go_to_page(1);
+    h.run_steps(3);
+    assert!(page(&h).width() > h.state().views[0].viewport_rect().width(), "the page is wider than the view");
+    let before = page(&h);
+    middle_drag(&mut h, p, egui::vec2(-40.0, -60.0), 10, egui::Modifiers::ALT);
+    let after = page(&h);
+    assert!((after.left() - before.left()).abs() < 0.5, "no sideways motion with Alt: {} → {}", before.left(), after.left());
+    assert!((after.top() - (before.top() - 60.0)).abs() < 1.0, "it follows the pointer up: {} → {}", before.top(), after.top());
+
+    // Plain: both ways, as before.
+    let before = page(&h);
+    middle_drag(&mut h, p, egui::vec2(-40.0, 30.0), 10, egui::Modifiers::NONE);
+    let after = page(&h);
+    assert!((after.left() - (before.left() - 40.0)).abs() < 1.0 && (after.top() - (before.top() + 30.0)).abs() < 1.0, "{before:?} → {after:?}");
+    assert!(!h.state().session.get(h.state().views[0].id).unwrap().dirty);
+}

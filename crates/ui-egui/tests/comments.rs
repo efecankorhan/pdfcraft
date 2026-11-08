@@ -2034,3 +2034,40 @@ fn pressure_sensitivity_settings_are_remembered_and_clamped() {
     d.restore(r#"{"pen_pressure_sensitivity": "loud", "pen_pressure_min": null}"#);
     assert_eq!((d.comment_prefs.pressure_sensitivity, d.comment_prefs.pressure_min), (0.5, 0.25));
 }
+
+/// Ctrl (⌘ on macOS) with the mouse wheel zooms about the pointer whatever tool is on, the pen
+/// included, and scrolls nothing.
+#[test]
+fn ctrl_wheel_zooms_with_any_tool() {
+    for tool in ["select", "ink", "eraser", "lasso"] {
+        let mut h = harness(move |app| app.set_option("quick", tool).unwrap());
+        let p = at(&h, 150.0, 100.0);
+        let z0 = h.state().views[0].zoom;
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+        for _ in 0..3 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::COMMAND,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        let z1 = h.state().views[0].zoom;
+        assert!(z1 > z0 * 1.05, "{tool}: Ctrl + wheel up zooms in ({z0} → {z1})");
+        for _ in 0..6 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::COMMAND,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        assert!(h.state().views[0].zoom < z1 / 1.05, "{tool}: Ctrl + wheel down zooms out");
+        assert!(comments(&h).is_empty(), "{tool}: zooming draws nothing");
+    }
+}

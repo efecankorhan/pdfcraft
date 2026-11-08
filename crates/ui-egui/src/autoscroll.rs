@@ -1,5 +1,6 @@
 //! Middle-button scrolling for the document viewport: Linux latches auto-scroll, other
-//! platforms pan while the button is held. Either way the page tools never see the button,
+//! platforms pan while the button is held (with Ctrl or ⌘ the drag zooms instead, up to zoom in;
+//! with Alt it moves only up and down). Either way the page tools never see the button,
 //! because egui's drag responses accept every pointer button. Also the edge scrolling of a
 //! text-selection drag.
 
@@ -22,7 +23,14 @@ pub(crate) struct AutoScroll {
     block_input: bool,
     /// Where the pointer was last frame during a held middle-button pan (not Linux).
     drag: Option<Pos2>,
+    /// Where a Ctrl/⌘ middle-drag zoom stays put on screen, while one is under way.
+    zoom_anchor: Option<Pos2>,
+    /// This frame's zoom from a Ctrl/⌘ middle-drag: a factor and the point to keep still.
+    zoom: Option<(f32, Pos2)>,
 }
+
+/// Zoom per point dragged with Ctrl/⌘ held: 100 points up doubles it.
+const DRAG_ZOOM_PER_POINT: f32 = std::f32::consts::LN_2 / 100.0;
 
 impl AutoScroll {
     pub(crate) fn active(&self) -> bool {
@@ -34,9 +42,16 @@ impl AutoScroll {
         self.drag.is_some()
     }
 
+    /// This frame's zoom from a Ctrl/⌘ middle-drag, if any: (factor, point to keep still).
+    pub(crate) fn take_zoom(&mut self) -> Option<(f32, Pos2)> {
+        self.zoom.take()
+    }
+
     pub(crate) fn cancel(&mut self) {
         self.anchor = None;
         self.drag = None;
+        self.zoom_anchor = None;
+        self.zoom = None;
         self.cancel_button = None;
         self.block_input = false;
     }
@@ -123,7 +138,8 @@ impl AutoScroll {
         self.anchor = None;
         self.cancel_button = None;
         let ctx = ui.ctx();
-        let (pointer, middle_press, middle_down, middle_released, focused) = ctx.input(|i| {
+        self.zoom = None;
+        let (pointer, middle_press, middle_down, middle_released, focused, zooming, vertical_only) = ctx.input(|i| {
             (
                 i.pointer.latest_pos().filter(|p| p.is_finite()),
                 // Read the press event itself: later movement in this frame is part of the pan.
@@ -134,6 +150,8 @@ impl AutoScroll {
                 i.pointer.button_down(PointerButton::Middle),
                 i.pointer.button_released(PointerButton::Middle),
                 i.focused,
+                i.modifiers.command || i.modifiers.ctrl,
+                i.modifiers.alt,
             )
         });
         self.block_input = self.drag.is_some() || middle_press.is_some() || middle_down || middle_released;
@@ -149,17 +167,44 @@ impl AutoScroll {
         {
             self.drag = Some(pressed_at);
         }
-        let (Some(last), Some(pointer)) = (self.drag, pointer) else { return Vec2::ZERO };
+        let (Some(last), Some(pointer)) = (self.drag, pointer) else {
+            self.zoom_anchor = None;
+            return Vec2::ZERO;
+        };
         self.drag = middle_down.then_some(pointer);
         // egui's delta moves the content, so the page follows the pointer.
         let delta = pointer - last;
-        if delta.is_finite() { delta } else { Vec2::ZERO }
+        if !delta.is_finite() {
+            return Vec2::ZERO;
+        }
+        if zooming {
+            // Up zooms in, down zooms out, about where the zoom began; nothing scrolls.
+            let at = *self.zoom_anchor.get_or_insert(last);
+            let factor = (-delta.y * DRAG_ZOOM_PER_POINT).exp();
+            if factor.is_finite() && factor > 0.0 && factor != 1.0 {
+                self.zoom = Some((factor, at));
+            }
+            if self.drag.is_none() {
+                self.zoom_anchor = None;
+            }
+            return Vec2::ZERO;
+        }
+        self.zoom_anchor = None;
+        // Alt locks the pan to up and down.
+        if vertical_only { vec2(0.0, delta.y) } else { delta }
     }
 
     /// Draw an original geometric marker at the activation point, above page content.
     pub(crate) fn paint(&self, ui: &egui::Ui, viewport: egui::Rect) {
         if self.drag.is_some() {
-            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            let icon = if self.zoom_anchor.is_some() {
+                CursorIcon::ZoomIn
+            } else if ui.input(|i| i.modifiers.alt) {
+                CursorIcon::ResizeVertical
+            } else {
+                CursorIcon::Grabbing
+            };
+            ui.ctx().set_cursor_icon(icon);
             return;
         }
         let Some(anchor) = self.anchor else { return };

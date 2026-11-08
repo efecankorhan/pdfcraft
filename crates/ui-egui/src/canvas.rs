@@ -2392,6 +2392,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         view.auto_scroll.cancel();
         Vec2::ZERO
     };
+    // Ctrl/⌘ with a middle-button drag zooms about where the drag began.
+    if let Some((factor, at)) = view.auto_scroll.take_zoom() {
+        view.zoom_at(view.zoom * factor, at);
+    }
 
     // Drawing a comment: the pointer in a band along any edge (or just past it) scrolls the view
     // that way, so a point beyond what is shown can be reached without letting go of the tool.
