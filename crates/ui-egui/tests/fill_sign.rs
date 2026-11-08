@@ -149,7 +149,8 @@ fn fill_text_size_controls_new_text_and_survives_settings_restore() {
     let mut h = harness();
     h.state_mut().execute("sign.fill.text");
     h.run_steps(2);
-    h.get_by_label("Font size:");
+    // The quick bar's text-size button (a popup since the inline field became one).
+    h.get_by_label("Font size");
     h.state_mut().fill_text_size = 24.0;
     click(&mut h, 50.0, 250.0);
     assert_eq!(h.state().views[0].fill_text.as_ref().map(|t| t.size), Some(24.0));

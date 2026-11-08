@@ -3178,6 +3178,14 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             {
                 view.links.context = Some((i, l.index));
             }
+            // Preparing a form, the secondary button belongs to the field menu (Properties,
+            // Duplicate, Align…): the comment wheel would open over it and hide that menu.
+            let field_menu_click = preparing
+                && ui.input(|inp| {
+                    inp.pointer.button_pressed(egui::PointerButton::Secondary)
+                        || inp.pointer.secondary_down()
+                        || inp.pointer.button_released(egui::PointerButton::Secondary)
+                });
             let consumed = radial_was_open
                 || on_objects
                 || on_edit_text
@@ -3185,6 +3193,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                 || on_content
                 || boxing
                 || on_field
+                || field_menu_click
                 || comments::page_input(ui, &resp, &pcx, view);
 
             let preview_target = (matches!(tool, QuickTool::Select | QuickTool::Lasso | QuickTool::Fill(_)) && !comments_hidden)
