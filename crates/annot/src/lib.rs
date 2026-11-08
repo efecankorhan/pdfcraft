@@ -1873,7 +1873,94 @@ fn border_width_of(d: &Dict) -> f64 {
     d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap_or(1.0).max(0.0)
 }
 
-/// Change a comment's colour, opacity, line width and/or line endings, and redraw it.
+/// A fountain-pen nib for a pen `width` (points): PDF ink has one line width per drawing, so the
+/// broad nib is drawn as `count` parallel hairlines `hairline` points wide spread over an edge
+/// `edge` points long, held at `angle_deg` (rising to the right). Neighbouring hairlines overlap,
+/// so together they fill the nib's sweep. One source for the drawing tool and for restyling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NibLayout {
+    pub edge: f64,
+    pub count: usize,
+    pub hairline: f64,
+}
+
+/// The nib edge's angle: rising 35° to the right, as a right-handed writer holds an italic nib.
+pub const NIB_ANGLE_DEG: f64 = 35.0;
+
+/// The nib's edge as a share of the pen width setting.
+const NIB_EDGE_SHARE: f64 = 0.7;
+
+pub fn nib_layout(width: f64) -> NibLayout {
+    let width = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
+    let edge = width * NIB_EDGE_SHARE;
+    let hairline = (edge * 0.3).max(0.45);
+    // Spaced at under half a hairline, so the sweep has no gaps at any zoom.
+    let count = ((edge / (hairline * 0.45)).ceil() as usize + 1).clamp(2, 24);
+    NibLayout { edge, count, hairline }
+}
+
+/// Offsets (user space) from the centre line to each hairline of `nib`, along unit `dir`.
+pub fn nib_offsets(nib: &NibLayout, dir: [f64; 2]) -> Vec<[f64; 2]> {
+    let last = nib.count.saturating_sub(1).max(1) as f64;
+    (0..nib.count)
+        .map(|i| {
+            let u = i as f64 / last - 0.5;
+            [dir[0] * nib.edge * u, dir[1] * nib.edge * u]
+        })
+        .collect()
+}
+
+/// The nib direction for [`NIB_ANGLE_DEG`] in user space (y up).
+pub fn nib_direction() -> [f64; 2] {
+    let (s, c) = NIB_ANGLE_DEG.to_radians().sin_cos();
+    [c, s]
+}
+
+/// Whether `strokes` are a fountain-pen drawing: at least three strokes with the same number of
+/// points, each the first moved by evenly spaced steps of one vector. Returns the centre line and
+/// the unit nib direction. Files saved before the restyle rule are recognised too.
+fn nib_drawing(strokes: &[Vec<[f64; 2]>]) -> Option<(Vec<[f64; 2]>, [f64; 2])> {
+    const TOL: f64 = 0.02;
+    let (first, last) = (strokes.first()?, strokes.last()?);
+    let (n, m) = (strokes.len(), first.len());
+    if n < 3 || m == 0 || n.saturating_mul(m) > 2_000_000 || strokes.iter().any(|s| s.len() != m) {
+        return None;
+    }
+    let (p0, q0) = (first.first()?, last.first()?);
+    let v = [q0[0] - p0[0], q0[1] - p0[1]];
+    let len = v[0].hypot(v[1]);
+    if !len.is_finite() || len < 1e-6 {
+        return None;
+    }
+    for (k, s) in strokes.iter().enumerate() {
+        let t = k as f64 / (n - 1) as f64;
+        for (p, q) in first.iter().zip(s) {
+            if (p[0] + v[0] * t - q[0]).abs() > TOL || (p[1] + v[1] * t - q[1]).abs() > TOL {
+                return None;
+            }
+        }
+    }
+    let centre = first.iter().map(|p| [p[0] + v[0] * 0.5, p[1] + v[1] * 0.5]).collect();
+    Some((centre, [v[0] / len, v[1] / len]))
+}
+
+/// The strokes of an Ink dictionary's `/InkList`.
+fn ink_strokes(doc: &Document, d: &Dict) -> Vec<Vec<[f64; 2]>> {
+    d.get(b"InkList")
+        .map(|l| doc.resolve(l))
+        .and_then(|l| l.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|s| {
+            let v: Vec<f64> = doc.resolve(s).as_array().map(|a| a.iter().filter_map(|x| doc.resolve(x).as_f64()).collect()).unwrap_or_default();
+            v.as_chunks::<2>().0.iter().map(|p| [p[0], p[1]]).collect()
+        })
+        .collect()
+}
+
+/// Change a comment's colour, opacity, line width and/or line endings, and redraw it. A new
+/// width for a fountain-pen drawing (see [`nib_layout`]) is its pen width: the hairlines are laid
+/// out again for it, so they never part.
 #[allow(clippy::too_many_arguments)]
 pub fn set_style(
     doc: &mut Document,
@@ -1905,6 +1992,17 @@ pub fn set_style(
     }
     refuse_foreign_text(doc, &d)?;
     let free_text = subtype == "FreeText";
+    // A fountain-pen drawing restyled to a new width gets new hairlines: (strokes, line width, rect).
+    let nib_redo = match width {
+        Some(w) if subtype == "Ink" => nib_drawing(&ink_strokes(doc, &d)).map(|(centre, dir)| {
+            let nib = nib_layout(w);
+            let strokes: Vec<Vec<[f64; 2]>> =
+                nib_offsets(&nib, dir).iter().map(|o| centre.iter().map(|p| [p[0] + o[0], p[1] + o[1]]).collect()).collect();
+            let rect = grow(bounds(strokes.iter().flatten().copied()).unwrap_or_default(), nib.hairline / 2.0 + 1.0);
+            (strokes, nib.hairline, rect)
+        }),
+        _ => None,
+    };
     let before = d;
     doc.update_dict(r, |d| {
         if let Some(c) = color {
@@ -1926,6 +2024,14 @@ pub fn set_style(
             }
         }
         if let Some(w) = width {
+            let w = match &nib_redo {
+                Some((strokes, hairline, rect)) => {
+                    d.set(b"InkList".to_vec(), Object::Array(strokes.iter().map(|s| num_array(&s.concat())).collect()));
+                    d.set(b"Rect".to_vec(), num_array(rect));
+                    *hairline
+                }
+                None => w,
+            };
             let mut bs = d.get(b"BS").and_then(|b| b.as_dict()).cloned().unwrap_or_default();
             bs.set(b"W".to_vec(), Object::Real(w.max(0.0)));
             d.set(b"BS".to_vec(), Object::Dict(bs));
@@ -2331,7 +2437,15 @@ pub fn add_text_replacement(
 /// The Eraser (Draw tools): remove the parts of drawing `(page, index)` within `radius` points
 /// of `path`, splitting strokes where they are cut. A drawing with nothing left is deleted.
 /// Returns whether anything was erased.
-pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]], radius: f64, whole_stroke: bool, meta: &Meta) -> Result<bool, AnnotError> {
+pub fn erase_ink(
+    doc: &mut Document,
+    page: usize,
+    index: usize,
+    path: &[[f64; 2]],
+    radius: f64,
+    whole_stroke: bool,
+    meta: &Meta,
+) -> Result<bool, AnnotError> {
     let (_, r) = annot_ref(doc, page, index)?;
     unlocked(doc, r)?;
     let d = annot_dict(doc, r);
@@ -2341,17 +2455,7 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
     if path.is_empty() || !path.iter().all(|p| finite(p)) || !radius.is_finite() || radius <= 0.0 {
         return Err(AnnotError::Invalid("invalid eraser path".into()));
     }
-    let strokes: Vec<Vec<[f64; 2]>> = d
-        .get(b"InkList")
-        .map(|l| doc.resolve(l))
-        .and_then(|l| l.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .map(|s| {
-            let v: Vec<f64> = doc.resolve(s).as_array().map(|a| a.iter().filter_map(|x| doc.resolve(x).as_f64()).collect()).unwrap_or_default();
-            v.as_chunks::<2>().0.iter().map(|p| [p[0], p[1]]).collect()
-        })
-        .collect();
+    let strokes = ink_strokes(doc, &d);
     // Distance from a point to the eraser's path (segments, or a single point).
     let near = |p: [f64; 2]| -> bool {
         if path.len() == 1 {

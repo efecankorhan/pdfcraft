@@ -1049,8 +1049,8 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                             let colour = color32(style.color).gamma_multiply(style.opacity.clamp(0.3, 1.0) as f32);
                             if cx.prefs.pen_mode() == PenMode::Fountain {
                                 // The fountain pen shows its nib: a short slash at the nib's angle.
-                                let half = ((style.width as f32 * zoom).clamp(5.0, 28.0)) * 0.5;
-                                let (s, c) = (NIB_ANGLE_DEG as f32).to_radians().sin_cos();
+                                let half = ((pdfcraft_engine::nib_layout(style.width).edge as f32 * zoom).clamp(4.0, 24.0)) * 0.5;
+                                let (s, c) = (pdfcraft_engine::NIB_ANGLE_DEG as f32).to_radians().sin_cos();
                                 let d = vec2(c, -s) * half;
                                 cp.line_segment([p - d, p + d], Stroke::new(3.0, Color32::from_white_alpha(200)));
                                 cp.line_segment([p - d, p + d], Stroke::new(1.75, colour));
@@ -2045,35 +2045,16 @@ fn new_comment(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, contents: Strin
     Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style, contents, author: cx.prefs.author.clone() })
 }
 
-/// A broad fountain-pen nib held at a fixed angle. PDF ink has one width per drawing, so the
-/// nib is drawn as `count` parallel hairlines spread across its edge: together they sweep the
-/// nib's footprint, thick where the pen moves across the edge and thin where it moves along it.
-/// The result is an ordinary Ink comment every viewer draws, and the Eraser cuts it like any
-/// other drawing.
+/// The fountain pen's nib for a pen width: hairline offsets (user space, y up) and their width.
+/// The layout is the engine's (`nib_layout`), which restyling uses too.
 pub(crate) struct FountainNib {
-    /// Offset (user space, y up) from the stroke to each hairline.
     offsets: Vec<[f64; 2]>,
-    /// Width of each hairline, in points.
     pub(crate) hairline: f64,
 }
 
-/// The nib edge's angle: rising 35° to the right on the page, as a right-handed writer holds an
-/// italic nib.
-const NIB_ANGLE_DEG: f64 = 35.0;
-
 pub(crate) fn fountain_nib(width: f64) -> FountainNib {
-    let edge = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
-    let hairline = (edge * 0.28).max(0.5);
-    // Hairlines overlap by half their width, so the swept area has no gaps.
-    let count = ((edge / (hairline * 0.5)).ceil() as usize + 1).clamp(2, 16);
-    let (s, c) = NIB_ANGLE_DEG.to_radians().sin_cos();
-    let offsets = (0..count)
-        .map(|i| {
-            let u = i as f64 / (count - 1) as f64 - 0.5;
-            [c * edge * u, s * edge * u]
-        })
-        .collect();
-    FountainNib { offsets, hairline }
+    let nib = pdfcraft_engine::nib_layout(width);
+    FountainNib { offsets: pdfcraft_engine::nib_offsets(&nib, pdfcraft_engine::nib_direction()), hairline: nib.hairline }
 }
 
 impl FountainNib {
@@ -2749,8 +2730,9 @@ mod tests {
     fn the_fountain_nib_is_wide_across_its_edge_and_thin_along_it() {
         for edge in [0.5, 3.5, 8.0, 16.0, 1e9, f64::NAN] {
             let nib = super::fountain_nib(edge);
-            let e = if edge.is_finite() { edge.clamp(0.5, 16.0) } else { 3.0 };
-            let (s, c) = super::NIB_ANGLE_DEG.to_radians().sin_cos();
+            let e = pdfcraft_engine::nib_layout(edge).edge;
+            assert!(e > 0.0 && e < 16.0);
+            let (s, c) = pdfcraft_engine::NIB_ANGLE_DEG.to_radians().sin_cos();
             // Spread of the hairlines across a stroke going in direction (dx, dy).
             let spread = |dx: f64, dy: f64| {
                 let d: Vec<f64> = nib.offsets.iter().map(|o| o[0] * -dy + o[1] * dx).collect();
@@ -2761,7 +2743,7 @@ mod tests {
             // Neighbouring hairlines overlap, so the swept nib has no gaps.
             let gap = e / (nib.offsets.len() - 1) as f64;
             assert!(gap <= nib.hairline, "{edge}: gap {gap} > hairline {}", nib.hairline);
-            assert!((2..=16).contains(&nib.offsets.len()));
+            assert!((2..=24).contains(&nib.offsets.len()));
         }
         let stroke = [[0.0, 0.0], [10.0, 0.0]];
         let nib = super::fountain_nib(4.0);

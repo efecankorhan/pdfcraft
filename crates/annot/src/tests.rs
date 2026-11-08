@@ -1313,3 +1313,47 @@ fn text_box_font_size_changes_the_da_and_grows_the_box() {
         assert_eq!(props(&doc, 0, i).unwrap().font_size, None);
     }
 }
+
+/// A fountain-pen drawing (parallel hairlines across a nib) given a new width gets hairlines
+/// laid out for it, so they never part; an ordinary multi-stroke drawing only changes its width.
+#[test]
+fn restyling_a_fountain_drawing_lays_out_its_hairlines_again() {
+    let mut doc = fixture();
+    let centre: Vec<[f64; 2]> = (0..20).map(|i| [20.0 + f64::from(i) * 5.0, 100.0 + (f64::from(i) * 0.4).sin() * 20.0]).collect();
+    let nib = nib_layout(3.5);
+    let strokes: Vec<Vec<[f64; 2]>> =
+        nib_offsets(&nib, nib_direction()).iter().map(|o| centre.iter().map(|p| [p[0] + o[0], p[1] + o[1]]).collect()).collect();
+    let style = Style { width: nib.hairline, ..Style::default_for(&Shape::Ink { strokes: Vec::new() }) };
+    let i = add_annotation(&mut doc, &NewAnnotation { style, ..new(0, Shape::Ink { strokes }) }, &meta("f")).unwrap();
+    let inks = |doc: &Document, i: usize| {
+        let d = &list(doc, 0)[i];
+        (ink_strokes(doc, d), d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap_or(-1.0))
+    };
+    // A wider pen: more hairlines, wider ones, over a longer edge, still centred on the line.
+    set_style(&mut doc, 0, i, None, None, Some(12.0), None, &meta("")).unwrap();
+    let (s, w) = inks(&doc, i);
+    let big = nib_layout(12.0);
+    assert_eq!((s.len(), w), (big.count, big.hairline));
+    let (first, last) = (&s[0], &s[s.len() - 1]);
+    let spread = (last[0][0] - first[0][0]).hypot(last[0][1] - first[0][1]);
+    assert!((spread - big.edge).abs() < 0.01, "{spread} vs {}", big.edge);
+    for (j, c) in centre.iter().enumerate() {
+        let mid = [(first[j][0] + last[j][0]) / 2.0, (first[j][1] + last[j][1]) / 2.0];
+        assert!((mid[0] - c[0]).abs() < 0.01 && (mid[1] - c[1]).abs() < 0.01);
+    }
+    // Neighbours overlap: the gap between hairlines is under one hairline width.
+    assert!(big.edge / (big.count - 1) as f64 <= big.hairline);
+    // Back down, and the spacing still holds.
+    set_style(&mut doc, 0, i, Some([0.0, 0.5, 0.0]), None, Some(1.0), None, &meta("")).unwrap();
+    let (s, w) = inks(&doc, i);
+    assert_eq!((s.len(), w), (nib_layout(1.0).count, nib_layout(1.0).hairline));
+    // A colour-only change leaves the hairlines alone.
+    set_style(&mut doc, 0, i, Some([1.0, 0.0, 0.0]), None, None, None, &meta("")).unwrap();
+    assert_eq!(inks(&doc, i).0, s);
+
+    // Ordinary strokes that are not evenly spaced copies of one another just get the width.
+    let plain = vec![vec![[0.0, 0.0], [10.0, 10.0]], vec![[0.0, 5.0], [10.0, 15.0]], vec![[0.0, 30.0], [10.0, 40.0]]];
+    let j = add_annotation(&mut doc, &new(0, Shape::Ink { strokes: plain.clone() }), &meta("p")).unwrap();
+    set_style(&mut doc, 0, j, None, None, Some(5.0), None, &meta("")).unwrap();
+    assert_eq!(inks(&doc, j), (plain, 5.0));
+}

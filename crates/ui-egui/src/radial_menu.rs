@@ -394,7 +394,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                             if !matches!(app.quick_tool, QuickTool::Comment(t) if t != CommentTool::Eraser) {
                                 app.quick_tool = QuickTool::Comment(style_tool);
                             }
-                            apply_style_to_selected(app, style_tool);
+                            apply_style_to_selected(app, style_tool, StyleChange::Color);
                             if let Some(v) = app.views.get_mut(view_index) {
                                 v.comments.cancelled_drag = true;
                                 if let Some(r) = v.comments.radial_menu.as_mut() {
@@ -454,8 +454,11 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                         }
                         // A selected comment gets the new style once, when the drag ends (one undo step).
                         let done = |r: &egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
-                        if done(&w) || done(&o) {
-                            apply_style_to_selected(app, style_tool);
+                        if done(&w) {
+                            apply_style_to_selected(app, style_tool, StyleChange::Width);
+                        }
+                        if done(&o) {
+                            apply_style_to_selected(app, style_tool, StyleChange::Opacity);
                         }
                     });
             });
@@ -748,7 +751,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
         SlotAction::SetColor(color) => {
             app.comment_prefs.set_color(style_tool, color);
             style_tool_on(app);
-            apply_style_to_selected(app, style_tool);
+            apply_style_to_selected(app, style_tool, StyleChange::Color);
             finish(app);
         }
         SlotAction::SelectPaletteSlot(slot) => {
@@ -762,13 +765,13 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
         SlotAction::SetWidth(w) => {
             app.comment_prefs.set_width(style_tool, w);
             style_tool_on(app);
-            apply_style_to_selected(app, style_tool);
+            apply_style_to_selected(app, style_tool, StyleChange::Width);
             finish(app);
         }
         SlotAction::SetOpacity(o) => {
             app.comment_prefs.set_opacity(style_tool, o);
             style_tool_on(app);
-            apply_style_to_selected(app, style_tool);
+            apply_style_to_selected(app, style_tool, StyleChange::Opacity);
             finish(app);
         }
         SlotAction::SetFontSize(size) => {
@@ -820,8 +823,23 @@ fn paint_slot(ui: &egui::Ui, painter: &egui::Painter, slot: &Slot, pos: Pos2, sc
     }
 }
 
-fn apply_style_to_selected(app: &mut PdfCraftApp, tool: CommentTool) {
+/// Which part of the style a wheel choice changed: only that part is applied to the selection,
+/// so recolouring keeps each comment's own width (and a fountain drawing its nib).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StyleChange {
+    Color,
+    Opacity,
+    Width,
+}
+
+fn apply_style_to_selected(app: &mut PdfCraftApp, tool: CommentTool, change: StyleChange) {
     let style = app.comment_prefs.style(tool);
+    let color = (change == StyleChange::Color).then_some(style.color);
+    let opacity = (change == StyleChange::Opacity).then_some(style.opacity);
+    let width = (change == StyleChange::Width && tool.has_width()).then_some(style.width);
+    if color.is_none() && opacity.is_none() && width.is_none() {
+        return;
+    }
     if let Some((index, id)) = app.active_ids()
         && let Some(view) = app.views.get(index)
         && let Some((page, annotation)) = view.comments.selected
@@ -829,26 +847,12 @@ fn apply_style_to_selected(app: &mut PdfCraftApp, tool: CommentTool) {
     {
         let also = view.comments.also.clone();
         if also.is_empty() {
-            app.apply_edit(pdfcraft_engine::Edit::StyleAnnotation {
-                page,
-                index: annotation,
-                color: Some(style.color),
-                opacity: Some(style.opacity),
-                width: tool.has_width().then_some(style.width),
-                endings: None,
-            });
+            app.apply_edit(pdfcraft_engine::Edit::StyleAnnotation { page, index: annotation, color, opacity, width, endings: None });
         } else {
             let mut edits: Vec<pdfcraft_engine::Edit> = also
                 .into_iter()
                 .chain(std::iter::once(annotation))
-                .map(|i| pdfcraft_engine::Edit::StyleAnnotation {
-                    page,
-                    index: i,
-                    color: Some(style.color),
-                    opacity: Some(style.opacity),
-                    width: tool.has_width().then_some(style.width),
-                    endings: None,
-                })
+                .map(|i| pdfcraft_engine::Edit::StyleAnnotation { page, index: i, color, opacity, width, endings: None })
                 .collect();
             edits.dedup_by_key(|e| match e {
                 pdfcraft_engine::Edit::StyleAnnotation { index, .. } => *index,
