@@ -1886,3 +1886,67 @@ fn a_closing_wheel_has_no_clickable_slots() {
     assert!(h.query_by_label("Marker").is_none() && h.query_by_label("Close").is_none(), "no ghost slots while it fades");
     assert!(comments(&h).is_empty());
 }
+
+/// A harness whose frames are 1/60 s, for timing-dependent gestures (the default step is 1/4 s).
+fn fine_harness(setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("text.pdf", None, TEXT_FIXTURE.to_vec()).expect("opens");
+        app.set_option("left", "closed").unwrap();
+        setup(&mut app);
+        app
+    });
+    h.run_steps(4);
+    settle(&mut h);
+    h
+}
+
+/// Draw a pen stroke through `path` (page points), one frame per point, then rest the pen for
+/// `hold` frames before lifting it. Returns the new comment's box height.
+fn stroke_with_hold(h: &mut Harness<'static, PdfCraftApp>, path: &[(f32, f32)], hold: usize) -> f32 {
+    let before: Vec<[f32; 4]> = comments(h).iter().map(|a| a.rect).collect();
+    let pts: Vec<Pos2> = path.iter().map(|(x, y)| at(h, *x, *y)).collect();
+    h.event(egui::Event::PointerMoved(pts[0]));
+    h.event(egui::Event::PointerButton { pos: pts[0], button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for p in &pts[1..] {
+        h.event(egui::Event::PointerMoved(*p));
+        h.step();
+    }
+    h.run_steps(hold);
+    let last = *pts.last().unwrap();
+    h.event(egui::Event::PointerButton { pos: last, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    let c = comments(h);
+    assert_eq!(c.len(), before.len() + 1, "{c:?}");
+    // The new comment (the list is in page order, not drawing order).
+    let r = c.iter().map(|a| a.rect).find(|r| !before.contains(r)).expect("the new stroke");
+    (r[3] - r[1]).abs()
+}
+
+/// Draw and hold: resting the pen at the end of a wobbly line straightens it; lifting at once
+/// keeps the wobble.
+#[test]
+fn holding_the_pen_at_the_end_of_a_line_straightens_it() {
+    let mut h = fine_harness(|app| app.set_option("quick", "ink").unwrap());
+    // A line that zig-zags 6 points either side of y.
+    let wobbly = |y: f32| (0..=16).map(move |i| (40.0 + i as f32 * 10.0, if i % 2 == 0 { y + 6.0 } else { y - 6.0 })).collect::<Vec<_>>();
+    let kept = stroke_with_hold(&mut h, &wobbly(60.0), 0);
+    let straight = stroke_with_hold(&mut h, &wobbly(140.0), 60);
+    assert!(kept - straight > 4.0, "the held stroke lost its wobble: kept {kept}, held {straight}");
+}
+
+/// A pause at the end of a curve (a letter, a loop) leaves it as drawn.
+#[test]
+fn holding_the_pen_at_the_end_of_a_curve_keeps_it() {
+    let mut h = fine_harness(|app| app.set_option("quick", "ink").unwrap());
+    let arc: Vec<(f32, f32)> = (0..=16)
+        .map(|i| {
+            let a = std::f32::consts::PI * i as f32 / 16.0;
+            (120.0 - 50.0 * a.cos(), 60.0 + 50.0 * a.sin())
+        })
+        .collect();
+    let height = stroke_with_hold(&mut h, &arc, 60);
+    assert!(height > 40.0, "the arc keeps its height: {height}");
+}

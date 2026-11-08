@@ -706,6 +706,10 @@ pub struct CommentView {
     /// Live continuous erasing in progress during an eraser drag.
     pub(crate) erasing: bool,
     pub(crate) last_eraser_pos: Option<(usize, Pos2)>,
+    /// Draw and hold: where and since when the pen has rested during a stroke.
+    pub(crate) pen_rest: Option<(f64, Pos2)>,
+    /// The stroke became a straight line (held still at its end); the end follows the pen.
+    pub(crate) straightened: bool,
     /// Drawings just released: shown from their points until the page raster that includes the
     /// committed annotation arrives, so the stroke never vanishes in between (#1858).
     pub(crate) settling: Vec<Settling>,
@@ -1035,15 +1039,26 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     if let Some(p) = pointer {
                         let cp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas-custom-cursor")));
                         if tool == CommentTool::Eraser {
-                            cp.circle_filled(p, 7.5, Color32::WHITE);
-                            cp.circle_stroke(p, 7.5, Stroke::new(1.5, Color32::BLACK));
+                            // The ring is the eraser's real reach (see `erase`).
+                            cp.circle_filled(p, ERASER_REACH, Color32::from_white_alpha(150));
+                            cp.circle_stroke(p, ERASER_REACH, Stroke::new(1.25, Color32::from_black_alpha(170)));
                             cp.circle_filled(p, 1.0, Color32::from_black_alpha(160));
                         } else {
                             let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
                             let style = cx.prefs.style(tool);
-                            let dot_r = ((style.width as f32 * zoom * 0.5).clamp(2.5, 12.0)).max(2.5);
-                            cp.circle_filled(p, dot_r, color32(style.color));
-                            cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                            let colour = color32(style.color).gamma_multiply(style.opacity.clamp(0.3, 1.0) as f32);
+                            if cx.prefs.pen_mode() == PenMode::Fountain {
+                                // The fountain pen shows its nib: a short slash at the nib's angle.
+                                let half = ((style.width as f32 * zoom).clamp(5.0, 28.0)) * 0.5;
+                                let (s, c) = (NIB_ANGLE_DEG as f32).to_radians().sin_cos();
+                                let d = vec2(c, -s) * half;
+                                cp.line_segment([p - d, p + d], Stroke::new(3.0, Color32::from_white_alpha(200)));
+                                cp.line_segment([p - d, p + d], Stroke::new(1.75, colour));
+                            } else {
+                                let dot_r = (style.width as f32 * zoom * 0.5).clamp(2.5, 12.0);
+                                cp.circle_filled(p, dot_r, colour);
+                                cp.circle_stroke(p, dot_r, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                            }
                         }
                     }
                 } else {
@@ -1056,6 +1071,8 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 && let Some(o) = origin
             {
                 cv.gesture = Some(Gesture::Draw { page: cx.page, tool, points: vec![cx.to_user(o)] });
+                cv.pen_rest = None;
+                cv.straightened = false;
                 if tool != CommentTool::Eraser {
                     cv.selected = None;
                     cv.also.clear();
@@ -1086,7 +1103,28 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                         }
                     }
                     cv.last_eraser_pos = Some((cx.page, p));
+                } else if *tool == CommentTool::Ink && cv.straightened {
+                    // A straightened stroke is a line from its start to wherever the pen is now.
+                    points.truncate(1);
+                    points.push(u);
                 } else if *tool == CommentTool::Ink {
+                    // Draw and hold: resting the pen at the end of a roughly straight stroke turns
+                    // it into a straight line, as in modern note apps.
+                    let now = ui.input(|i| i.time);
+                    match cv.pen_rest {
+                        Some((_, at)) if at.distance(p) <= HOLD_SLOP => {}
+                        _ => cv.pen_rest = Some((now, p)),
+                    }
+                    if let Some((since, _)) = cv.pen_rest {
+                        if now - since + 1e-6 >= HOLD_SECS && straightens(points, |q| cx.to_screen(q)) {
+                            let first = points.first().copied().unwrap_or(u);
+                            *points = vec![first, u];
+                            cv.straightened = true;
+                        } else {
+                            // Wake up when the hold would be long enough, with no input to do it.
+                            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((HOLD_SECS - (now - since)).max(0.02)));
+                        }
+                    }
                     // Every pointer move this frame, not just the last one: a fast stroke gets
                     // all the pen's samples instead of straight chords between frames.
                     let moves: Vec<egui::Pos2> =
@@ -1852,6 +1890,30 @@ fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, poin
 }
 
 /// The shape a finished drawing gesture makes (`None` if it is too small to mean anything).
+/// Draw and hold: how long the pen must rest (seconds) and how far it may drift (screen points).
+const HOLD_SECS: f64 = 0.5;
+const HOLD_SLOP: f32 = 3.0;
+
+/// Whether a stroke is a line a hold should straighten: long enough (30 screen points), and no
+/// point strays from the chord between its ends by more than 12% of its length. Curves and
+/// letters a writer pauses on stay as drawn.
+fn straightens(points: &[[f64; 2]], to_screen: impl Fn([f64; 2]) -> Pos2) -> bool {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else { return false };
+    if points.len() < 3 {
+        return false;
+    }
+    let (a, b) = (to_screen(*first), to_screen(*last));
+    let len = a.distance(b);
+    if !len.is_finite() || len < 30.0 {
+        return false;
+    }
+    let n = (b - a) / len;
+    points.iter().all(|q| {
+        let d = to_screen(*q) - a;
+        (d.x * n.y - d.y * n.x).abs() <= len * 0.12
+    })
+}
+
 /// Pen samples closer than this (screen points) are skipped: pixel-step jitter, not shape.
 const INK_MIN_STEP: f32 = 1.25;
 /// Points one stroke may hold (an hour of scribbling is far less); bounds memory for a stuck button.
@@ -1895,10 +1957,13 @@ fn drawn_shape(tool: CommentTool, points: &[[f64; 2]]) -> Option<Shape> {
     }
 }
 
+/// How far the Eraser reaches from the pointer, in screen points (its cursor ring).
+const ERASER_REACH: f32 = 12.0;
+
 /// Eraser: rub out drawings along `path` (user space); one undo step for all of them.
 fn erase(cx: &PageCx<'_>, path: &[[f64; 2]], live: bool) -> Option<Edit> {
     let zoom = (cx.xf.rect.width() / cx.xf.pw.max(1.0)) as f64;
-    let radius = (12.0 / zoom).max(2.0);
+    let radius = (f64::from(ERASER_REACH) / zoom).max(2.0);
     let b = path.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |r, p| [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])]);
     let mut hits: Vec<usize> = cx
         .comments()
@@ -2667,6 +2732,19 @@ pub fn status_badge(state: &str) -> Option<(&'static str, &'static str, Color32)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_long_nearly_straight_strokes_straighten() {
+        let id = |q: [f64; 2]| egui::pos2(q[0] as f32, q[1] as f32);
+        assert!(!super::straightens(&[], id));
+        assert!(!super::straightens(&[[0.0, 0.0], [100.0, 0.0]], id), "two points are already a line");
+        assert!(!super::straightens(&[[0.0, 0.0], [5.0, 1.0], [10.0, 0.0]], id), "too short");
+        assert!(super::straightens(&[[0.0, 0.0], [50.0, 6.0], [100.0, 0.0]], id), "a wobble within 12%");
+        assert!(!super::straightens(&[[0.0, 0.0], [50.0, 40.0], [100.0, 0.0]], id), "an arc");
+        assert!(!super::straightens(&[[0.0, 0.0], [50.0, f64::NAN], [f64::NAN, 0.0]], id), "non-finite ends");
+        // A closed loop (ends together) is never a line.
+        assert!(!super::straightens(&[[0.0, 0.0], [50.0, 50.0], [0.0, 0.5]], id));
+    }
+
     #[test]
     fn the_fountain_nib_is_wide_across_its_edge_and_thin_along_it() {
         for edge in [0.5, 3.5, 8.0, 16.0, 1e9, f64::NAN] {
