@@ -344,6 +344,11 @@ pub struct CommentPrefs {
     pub radial_palette: [Rgb; 8],
     /// Which slot (0..8) in `radial_palette` is targeted when picking a custom colour.
     pub selected_palette_slot: usize,
+    /// Pen pressure varies the pen's width (pen, fountain pen and marker; never the highlighter).
+    pub pressure: bool,
+    /// Where pen pressure is read, 0 to 1, or `None` while the tip is up or for a mouse. Set by
+    /// the platform shell (the desktop app on Windows); without one, strokes keep one width.
+    pub pressure_source: Option<fn() -> Option<f32>>,
 }
 
 impl Default for CommentPrefs {
@@ -370,6 +375,8 @@ impl Default for CommentPrefs {
                 [0.54, 0.25, 0.82], // Purple
             ],
             selected_palette_slot: 4,
+            pressure: true,
+            pressure_source: None,
         }
     }
 }
@@ -663,6 +670,8 @@ pub(crate) struct Settling {
     pub page: usize,
     pub tool: CommentTool,
     pub points: Vec<[f64; 2]>,
+    /// Pen pressure at each point, when it was read.
+    pub pressures: Vec<f32>,
     /// Frame time (seconds) at release; a raster that never arrives must not leave a ghost.
     pub since: f64,
 }
@@ -673,7 +682,7 @@ const SETTLE_MAX: usize = 16;
 
 impl CommentView {
     /// Remember a released drag drawing so it stays on screen until its page is re-rendered.
-    fn settle(&mut self, now: f64, page: usize, tool: CommentTool, points: &[[f64; 2]]) {
+    fn settle(&mut self, now: f64, page: usize, tool: CommentTool, points: &[[f64; 2]], pressures: &[f32]) {
         if !matches!(tool, CommentTool::Ink | CommentTool::Line | CommentTool::Arrow | CommentTool::Rectangle | CommentTool::Oval) {
             return;
         }
@@ -681,7 +690,7 @@ impl CommentView {
         if self.settling.len() >= SETTLE_MAX {
             self.settling.remove(0);
         }
-        self.settling.push(Settling { page, tool, points: points.to_vec(), since: now });
+        self.settling.push(Settling { page, tool, points: points.to_vec(), pressures: pressures.to_vec(), since: now });
     }
 
     /// How many released drawings are still painted from their points (waiting for a raster).
@@ -710,6 +719,8 @@ pub struct CommentView {
     pub(crate) pen_rest: Option<(f64, Pos2)>,
     /// The stroke became a straight line (held still at its end); the end follows the pen.
     pub(crate) straightened: bool,
+    /// Pen pressure at each point of the stroke being drawn (empty without a pressure source).
+    pub(crate) pressures: Vec<f32>,
     /// Drawings just released: shown from their points until the page raster that includes the
     /// committed annotation arrives, so the stroke never vanishes in between (#1858).
     pub(crate) settling: Vec<Settling>,
@@ -1073,6 +1084,7 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                 cv.gesture = Some(Gesture::Draw { page: cx.page, tool, points: vec![cx.to_user(o)] });
                 cv.pen_rest = None;
                 cv.straightened = false;
+                cv.pressures = cx.prefs.pressure_source.and_then(|f| f()).into_iter().collect();
                 if tool != CommentTool::Eraser {
                     cv.selected = None;
                     cv.also.clear();
@@ -1107,6 +1119,10 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     // A straightened stroke is a line from its start to wherever the pen is now.
                     points.truncate(1);
                     points.push(u);
+                    if let Some(pr) = cx.prefs.pressure_source.and_then(|f| f()) {
+                        cv.pressures.truncate(1);
+                        cv.pressures.push(pr);
+                    }
                 } else if *tool == CommentTool::Ink {
                     // Draw and hold: resting the pen at the end of a roughly straight stroke turns
                     // it into a straight line, as in modern note apps.
@@ -1120,6 +1136,11 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                             let first = points.first().copied().unwrap_or(u);
                             *points = vec![first, u];
                             cv.straightened = true;
+                            let ends = (cv.pressures.first().copied(), cv.pressures.last().copied());
+                            cv.pressures = match ends {
+                                (Some(a), Some(b)) => vec![a, b],
+                                _ => Vec::new(),
+                            };
                         } else {
                             // Wake up when the hold would be long enough, with no input to do it.
                             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((HOLD_SECS - (now - since)).max(0.02)));
@@ -1130,6 +1151,8 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     let moves: Vec<egui::Pos2> =
                         ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::PointerMoved(m) = e { Some(*m) } else { None }).collect());
                     let samples = if moves.is_empty() { vec![p] } else { moves };
+                    // One pressure reading a frame, given to the frame's samples.
+                    let pressure = cx.prefs.pressure_source.and_then(|f| f());
                     for m in samples {
                         if points.len() >= MAX_INK_POINTS {
                             break;
@@ -1138,6 +1161,9 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                         let last = points.last().map(|l| cx.to_screen(*l)).unwrap_or(m);
                         if last.distance(m) >= INK_MIN_STEP {
                             points.push(cx.to_user(m));
+                            if let Some(pr) = pressure {
+                                cv.pressures.push(pr);
+                            }
                         }
                     }
                 } else {
@@ -1155,8 +1181,9 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     cv.last_eraser_pos = None;
                 } else if let Some(shape) = drawn_shape(tool, &points) {
                     let now = ui.input(|i| i.time);
-                    cv.settle(now, page, tool, &points);
-                    view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                    let pressures = std::mem::take(&mut cv.pressures);
+                    cv.settle(now, page, tool, &points, &pressures);
+                    view.pending_edit = Some(new_drawing(cx, tool, shape, &pressures));
                     committed = true;
                 }
             }
@@ -1171,10 +1198,10 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
                     let pts = vec![cx.to_user(p)];
                     if let Some(shape) = drawn_shape(tool, &pts) {
                         let now = ui.input(|i| i.time);
-                        cv.settle(now, cx.page, tool, &pts);
+                        cv.settle(now, cx.page, tool, &pts, &[]);
                         cv.selected = None;
                         cv.also.clear();
-                        view.pending_edit = Some(new_comment(cx, tool, shape, String::new()));
+                        view.pending_edit = Some(new_drawing(cx, tool, shape, &[]));
                     }
                 }
             }
@@ -1747,12 +1774,12 @@ pub(crate) fn paint_page(ui: &egui::Ui, painter: &egui::Painter, cx: &PageCx<'_>
 fn paint_gesture(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
     let now = painter.ctx().input(|i| i.time);
     for s in view.comments.settling.iter().filter(|s| s.page == cx.page && now - s.since < SETTLE_SECS) {
-        paint_draw(painter, cx, &s.tool, &s.points);
+        paint_draw(painter, cx, &s.tool, &s.points, &s.pressures);
     }
     if let Some(Gesture::Draw { page, tool, points }) = &view.comments.gesture
         && *page == cx.page
     {
-        paint_draw(painter, cx, tool, points);
+        paint_draw(painter, cx, tool, points, &view.comments.pressures);
     }
     if let Some(Gesture::Lasso { page, points }) = &view.comments.gesture
         && *page == cx.page
@@ -1812,7 +1839,7 @@ fn smooth_polyline(pts: &[Pos2]) -> Vec<Pos2> {
 }
 
 /// A drawing tool's shape from its points (a live drag, or a released one still settling).
-fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, points: &[[f64; 2]]) {
+fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, points: &[[f64; 2]], pressures: &[f32]) {
     {
         let style = cx.prefs.style(*tool);
         let zoom = cx.xf.rect.width() / cx.xf.pw.max(1.0);
@@ -1820,14 +1847,15 @@ fn paint_draw(painter: &egui::Painter, cx: &PageCx<'_>, tool: &CommentTool, poin
         let stroke = Stroke::new((style.width as f32 * zoom).max(1.0), color);
         let pts: Vec<Pos2> = points.iter().map(|p| cx.to_screen(*p)).collect();
         match tool {
-            CommentTool::Ink if cx.prefs.pen_mode() == PenMode::Fountain && !pts.is_empty() => {
-                // The same hairlines the comment will have, in screen space (y down).
-                let nib = fountain_nib(style.width);
-                let hair = Stroke::new((nib.hairline as f32 * zoom).max(1.0), stroke.color);
-                let smooth = smooth_polyline(&pts);
-                for o in &nib.offsets {
-                    let d = vec2(o[0] as f32, -(o[1] as f32)) * zoom;
-                    let line: Vec<Pos2> = smooth.iter().map(|p| *p + d).collect();
+            CommentTool::Ink
+                if !pts.is_empty()
+                    && let Some((hairlines, hairline)) = ink_hairlines(cx.prefs, style.width, &smooth_stroke(points), pressures) =>
+            {
+                // The same hairlines the comment will have (a fountain pen's nib, or a ribbon
+                // whose width follows the pen's pressure).
+                let hair = Stroke::new((hairline as f32 * zoom).max(1.0), stroke.color);
+                for line in hairlines {
+                    let line: Vec<Pos2> = line.iter().map(|p| cx.to_screen(*p)).collect();
                     if let [only] = line.as_slice() {
                         painter.circle_filled(*only, (hair.width * 0.5).max(0.75), hair.color);
                     } else {
@@ -2032,36 +2060,90 @@ fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
 }
 
 fn new_comment(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, contents: String) -> Edit {
-    let mut style = cx.prefs.style(tool);
-    // The fountain pen's nib is drawn as parallel hairlines (see `fountain_nib`).
-    let shape = match shape {
-        Shape::Ink { strokes } if tool == CommentTool::Ink && cx.prefs.pen_mode() == PenMode::Fountain => {
-            let nib = fountain_nib(style.width);
-            style.width = nib.hairline;
-            Shape::Ink { strokes: strokes.iter().flat_map(|s| nib.strokes(s)).collect() }
-        }
-        other => other,
-    };
+    let style = cx.prefs.style(tool);
     Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style, contents, author: cx.prefs.author.clone() })
 }
 
-/// The fountain pen's nib for a pen width: hairline offsets (user space, y up) and their width.
-/// The layout is the engine's (`nib_layout`), which restyling uses too.
-pub(crate) struct FountainNib {
-    offsets: Vec<[f64; 2]>,
-    pub(crate) hairline: f64,
+/// A drawn comment. The pen's strokes become hairlines when the fountain pen's nib or the pen's
+/// pressure shapes them (`pressures`: one reading per point, or none).
+fn new_drawing(cx: &PageCx<'_>, tool: CommentTool, shape: Shape, pressures: &[f32]) -> Edit {
+    let mut style = cx.prefs.style(tool);
+    let shape = match shape {
+        Shape::Ink { strokes } if tool == CommentTool::Ink => {
+            let mut out = Vec::new();
+            for s in &strokes {
+                match ink_hairlines(cx.prefs, style.width, s, pressures) {
+                    Some((lines, hairline)) => {
+                        style.width = hairline;
+                        out.extend(lines);
+                    }
+                    None => out.push(s.clone()),
+                }
+            }
+            Shape::Ink { strokes: out }
+        }
+        other => other,
+    };
+    Edit::AddAnnotation(NewAnnotation { page: cx.page, shape, style, contents: String::new(), author: cx.prefs.author.clone() })
 }
 
-pub(crate) fn fountain_nib(width: f64) -> FountainNib {
-    let nib = pdfcraft_engine::nib_layout(width);
-    FountainNib { offsets: pdfcraft_engine::nib_offsets(&nib, pdfcraft_engine::nib_direction()), hairline: nib.hairline }
+/// How much of the pen's width a pressure reading draws: a light touch still leaves a line.
+fn pressure_scale(p: f32) -> f64 {
+    let p = if p.is_finite() { f64::from(p).clamp(0.0, 1.0) } else { 1.0 };
+    0.25 + 0.75 * p.powf(0.8)
 }
 
-impl FountainNib {
-    /// The hairlines one stroke becomes.
-    pub(crate) fn strokes(&self, stroke: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
-        self.offsets.iter().map(|o| stroke.iter().map(|p| [p[0] + o[0], p[1] + o[1]]).collect()).collect()
+/// The hairlines a pen stroke (user space, already smoothed) is drawn as, with their width; or
+/// `None` for a plain stroke of one width. The fountain pen always draws its nib; pressure (when
+/// on, read for every point, and not for the highlighter) widens the nib or the pen's ribbon.
+fn ink_hairlines(prefs: &CommentPrefs, width: f64, stroke: &[[f64; 2]], pressures: &[f32]) -> Option<(Vec<Vec<[f64; 2]>>, f64)> {
+    let mode = prefs.pen_mode();
+    let fountain = mode == PenMode::Fountain;
+    let use_pressure = prefs.pressure && mode != PenMode::Highlighter && stroke.len() >= 2 && pressures.len() == stroke.len();
+    if !fountain && !use_pressure {
+        return None;
     }
+    // Smooth the readings like the points, so the width swells instead of stepping.
+    let scale: Vec<f64> = if use_pressure {
+        let raw: Vec<f64> = pressures.iter().map(|p| pressure_scale(*p)).collect();
+        (0..raw.len())
+            .map(|j| {
+                let (a, b, c) = (raw.get(j.wrapping_sub(1)).or(raw.get(j)), raw.get(j), raw.get(j + 1).or(raw.get(j)));
+                match (a, b, c) {
+                    (Some(a), Some(b), Some(c)) => 0.25 * a + 0.5 * b + 0.25 * c,
+                    _ => 1.0,
+                }
+            })
+            .collect()
+    } else {
+        vec![1.0; stroke.len()]
+    };
+    let (spread, hairline): (Vec<[f64; 2]>, f64) = if fountain {
+        let nib = pdfcraft_engine::nib_layout(width);
+        let d = pdfcraft_engine::nib_direction();
+        (scale.iter().map(|k| [d[0] * nib.edge * k, d[1] * nib.edge * k]).collect(), nib.hairline)
+    } else {
+        // Across the stroke: the normal of the direction through each point's neighbours.
+        let lay = pdfcraft_engine::ribbon_layout(width);
+        let mut last_n = [0.0, 1.0];
+        let spread = (0..stroke.len())
+            .map(|j| {
+                let a = stroke.get(j.saturating_sub(1)).or(stroke.get(j));
+                let b = stroke.get(j + 1).or(stroke.get(j));
+                if let (Some(a), Some(b)) = (a, b) {
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let len = dx.hypot(dy);
+                    if len.is_finite() && len > 1e-9 {
+                        last_n = [-dy / len, dx / len];
+                    }
+                }
+                let k = scale.get(j).copied().unwrap_or(1.0) * lay.edge;
+                [last_n[0] * k, last_n[1] * k]
+            })
+            .collect();
+        (spread, lay.hairline)
+    };
+    Some((pdfcraft_engine::ribbon_strokes(stroke, &spread, hairline), hairline))
 }
 
 /// The floating composer card (new note, new text box, edit). Returns the edit to apply.
@@ -2728,27 +2810,23 @@ mod tests {
 
     #[test]
     fn the_fountain_nib_is_wide_across_its_edge_and_thin_along_it() {
-        for edge in [0.5, 3.5, 8.0, 16.0, 1e9, f64::NAN] {
-            let nib = super::fountain_nib(edge);
-            let e = pdfcraft_engine::nib_layout(edge).edge;
-            assert!(e > 0.0 && e < 16.0);
+        for width in [0.5, 3.5, 8.0, 16.0, 1e9, f64::NAN] {
+            let nib = pdfcraft_engine::nib_layout(width);
+            let offsets = pdfcraft_engine::nib_offsets(&nib, pdfcraft_engine::nib_direction());
+            assert!(nib.edge > 0.0 && nib.edge < 16.0);
             let (s, c) = pdfcraft_engine::NIB_ANGLE_DEG.to_radians().sin_cos();
             // Spread of the hairlines across a stroke going in direction (dx, dy).
             let spread = |dx: f64, dy: f64| {
-                let d: Vec<f64> = nib.offsets.iter().map(|o| o[0] * -dy + o[1] * dx).collect();
+                let d: Vec<f64> = offsets.iter().map(|o| o[0] * -dy + o[1] * dx).collect();
                 d.iter().cloned().fold(f64::MIN, f64::max) - d.iter().cloned().fold(f64::MAX, f64::min)
             };
-            assert!(spread(c, s).abs() < 1e-9, "along the edge: no width ({edge})");
-            assert!((spread(-s, c) - e).abs() < 1e-9, "across the edge: the full nib ({edge})");
+            assert!(spread(c, s).abs() < 1e-9, "along the edge: no width ({width})");
+            assert!((spread(-s, c) - nib.edge).abs() < 1e-9, "across the edge: the full nib ({width})");
             // Neighbouring hairlines overlap, so the swept nib has no gaps.
-            let gap = e / (nib.offsets.len() - 1) as f64;
-            assert!(gap <= nib.hairline, "{edge}: gap {gap} > hairline {}", nib.hairline);
-            assert!((2..=24).contains(&nib.offsets.len()));
+            let gap = nib.edge / (offsets.len() - 1) as f64;
+            assert!(gap <= nib.hairline, "{width}: gap {gap} > hairline {}", nib.hairline);
+            assert!((2..=24).contains(&offsets.len()));
         }
-        let stroke = [[0.0, 0.0], [10.0, 0.0]];
-        let nib = super::fountain_nib(4.0);
-        assert_eq!(nib.strokes(&stroke).len(), nib.offsets.len());
-        assert!(nib.strokes(&[]).iter().all(Vec::is_empty));
     }
 
     use super::*;

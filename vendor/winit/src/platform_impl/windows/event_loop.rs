@@ -991,6 +991,17 @@ unsafe fn release_mouse(mut window_state: MutexGuard<'_, WindowState>) {
     }
 }
 
+/// PdfCraft patch: the pen's latest tip pressure (0..=1) as `f32` bits, NaN while the tip is
+/// up or no pen has reported one. Pen input reaches applications as mouse events (see
+/// `WM_POINTERUPDATE`), so pressure is offered here for them to read each frame. One value for
+/// the whole process: enough for one window and one pen.
+static PEN_PRESSURE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7FC0_0000);
+
+pub(crate) fn pen_pressure() -> Option<f32> {
+    let p = f32::from_bits(PEN_PRESSURE.load(std::sync::atomic::Ordering::Relaxed));
+    (p.is_finite() && p > 0.0).then(|| p.min(1.0))
+}
+
 fn normalize_pointer_pressure(pressure: u32) -> Option<Force> {
     match pressure {
         1..=1024 => Some(Force::Normalized(pressure as f64 / 1024.0)),
@@ -2145,6 +2156,12 @@ unsafe fn public_window_callback_inner(
                         if !in_contact && !barrel {
                             PEN_SUPPRESS_TIP.store(false, Ordering::Relaxed);
                         }
+
+                        let pressure = match &force {
+                            Some(f) if in_contact && !barrel => f.normalized() as f32,
+                            _ => f32::NAN,
+                        };
+                        PEN_PRESSURE.store(pressure.to_bits(), Ordering::Relaxed);
 
                         if barrel {
                             PEN_SUPPRESS_TIP.store(true, Ordering::Relaxed);

@@ -2287,6 +2287,7 @@ impl PdfCraftApp {
             .collect::<Vec<_>>()
             .into();
         v["radial_palette"] = serde_json::json!(self.comment_prefs.radial_palette);
+        v["pen_pressure"] = serde_json::Value::Bool(self.comment_prefs.pressure);
         // Set apart: one more key inside the macro above passes serde_json's recursion limit.
         v["redact_prefs"] = self.redact_defaults.to_json();
         // Set outside json! above, which is at serde_json's macro recursion limit.
@@ -2436,6 +2437,9 @@ impl PdfCraftApp {
             self.comment_prefs.restore_pen_mode(mode);
         } else {
             self.comment_prefs.adopt_legacy_ink_style();
+        }
+        if let Some(on) = v["pen_pressure"].as_bool() {
+            self.comment_prefs.pressure = on;
         }
         if let Some(palette) = v["radial_palette"].as_array() {
             for (slot, c) in self.comment_prefs.radial_palette.iter_mut().zip(palette) {

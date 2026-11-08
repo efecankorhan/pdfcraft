@@ -3,7 +3,7 @@ use windows_sys::Win32::Foundation::{HANDLE, HWND};
 use windows_sys::Win32::UI::WindowsAndMessaging::{HMENU, WINDOW_LONG_PTR_INDEX};
 
 pub(crate) use self::event_loop::{
-    ActiveEventLoop, EventLoop, EventLoopProxy, OwnedDisplayHandle,
+    pen_pressure, ActiveEventLoop, EventLoop, EventLoopProxy, OwnedDisplayHandle,
     PlatformSpecificEventLoopAttributes,
 };
 pub(crate) use self::icon::{SelectedCursor, WinIcon};

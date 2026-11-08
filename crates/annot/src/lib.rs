@@ -1910,38 +1910,89 @@ pub fn nib_offsets(nib: &NibLayout, dir: [f64; 2]) -> Vec<[f64; 2]> {
         .collect()
 }
 
+/// A pressure-sensitive pen stroke drawn as a ribbon of hairlines across the stroke: `edge` is
+/// its width at full pressure. Same spacing rule as [`nib_layout`].
+pub fn ribbon_layout(width: f64) -> NibLayout {
+    let edge = if width.is_finite() { width.clamp(0.5, 16.0) } else { 3.0 };
+    // The same hairline as the nib's for this width (0.21 × width), so restyling a hairline
+    // drawing needs no guess at which pen drew it.
+    let hairline = (edge * NIB_EDGE_SHARE * 0.3).max(0.45);
+    let count = ((edge / (hairline * 0.45)).ceil() as usize + 1).clamp(2, 24);
+    NibLayout { edge, count, hairline }
+}
+
+/// The hairlines of a ribbon around `centre`, where `spread[j]` is the full vector across the
+/// ribbon at point j (its width and direction there). Enough hairlines that neighbours overlap
+/// where the ribbon is widest; a ribbon with no width is the centre line alone. `spread` shorter
+/// than `centre` repeats its last vector.
+pub fn ribbon_strokes(centre: &[[f64; 2]], spread: &[[f64; 2]], hairline: f64) -> Vec<Vec<[f64; 2]>> {
+    let widest = spread.iter().map(|v| v[0].hypot(v[1])).filter(|w| w.is_finite()).fold(0.0, f64::max);
+    let hairline = if hairline.is_finite() && hairline > 0.0 { hairline } else { 0.45 };
+    if widest < 1e-9 || spread.is_empty() {
+        return vec![centre.to_vec()];
+    }
+    let count = ((widest / (hairline * 0.45)).ceil() as usize + 1).clamp(2, 24);
+    let last = spread.last().copied().unwrap_or([0.0, 0.0]);
+    (0..count)
+        .map(|k| {
+            let u = k as f64 / (count - 1) as f64 - 0.5;
+            centre
+                .iter()
+                .enumerate()
+                .map(|(j, p)| {
+                    let v = spread.get(j).copied().unwrap_or(last);
+                    [p[0] + v[0] * u, p[1] + v[1] * u]
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// The nib direction for [`NIB_ANGLE_DEG`] in user space (y up).
 pub fn nib_direction() -> [f64; 2] {
     let (s, c) = NIB_ANGLE_DEG.to_radians().sin_cos();
     [c, s]
 }
 
-/// Whether `strokes` are a fountain-pen drawing: at least three strokes with the same number of
-/// points, each the first moved by evenly spaced steps of one vector. Returns the centre line and
-/// the unit nib direction. Files saved before the restyle rule are recognised too.
-fn nib_drawing(strokes: &[Vec<[f64; 2]>]) -> Option<(Vec<[f64; 2]>, [f64; 2])> {
+/// A drawing made of hairlines (a fountain pen's nib, or a pressure-sensitive pen's ribbon).
+struct HairlineDrawing {
+    centre: Vec<[f64; 2]>,
+    /// The full vector across the drawing at each point.
+    spread: Vec<[f64; 2]>,
+}
+
+impl HairlineDrawing {
+    /// One spread vector everywhere: a fountain pen without pressure.
+    fn constant(&self) -> Option<[f64; 2]> {
+        let first = *self.spread.first()?;
+        self.spread.iter().all(|v| (v[0] - first[0]).abs() < 0.02 && (v[1] - first[1]).abs() < 0.02).then_some(first)
+    }
+}
+
+/// Whether `strokes` are a hairline drawing: at least three strokes with the same number of
+/// points, each point of stroke k lying k/(n−1) of the way from the first stroke's point to the
+/// last's. Files saved before the restyle rule are recognised too.
+fn hairline_drawing(strokes: &[Vec<[f64; 2]>]) -> Option<HairlineDrawing> {
     const TOL: f64 = 0.02;
     let (first, last) = (strokes.first()?, strokes.last()?);
     let (n, m) = (strokes.len(), first.len());
     if n < 3 || m == 0 || n.saturating_mul(m) > 2_000_000 || strokes.iter().any(|s| s.len() != m) {
         return None;
     }
-    let (p0, q0) = (first.first()?, last.first()?);
-    let v = [q0[0] - p0[0], q0[1] - p0[1]];
-    let len = v[0].hypot(v[1]);
-    if !len.is_finite() || len < 1e-6 {
+    let spread: Vec<[f64; 2]> = first.iter().zip(last).map(|(p, q)| [q[0] - p[0], q[1] - p[1]]).collect();
+    if !spread.iter().flatten().all(|x| x.is_finite()) || spread.iter().all(|v| v[0].hypot(v[1]) < 1e-6) {
         return None;
     }
     for (k, s) in strokes.iter().enumerate() {
         let t = k as f64 / (n - 1) as f64;
-        for (p, q) in first.iter().zip(s) {
+        for ((p, v), q) in first.iter().zip(&spread).zip(s) {
             if (p[0] + v[0] * t - q[0]).abs() > TOL || (p[1] + v[1] * t - q[1]).abs() > TOL {
                 return None;
             }
         }
     }
-    let centre = first.iter().map(|p| [p[0] + v[0] * 0.5, p[1] + v[1] * 0.5]).collect();
-    Some((centre, [v[0] / len, v[1] / len]))
+    let centre = first.iter().zip(&spread).map(|(p, v)| [p[0] + v[0] * 0.5, p[1] + v[1] * 0.5]).collect();
+    Some(HairlineDrawing { centre, spread })
 }
 
 /// The strokes of an Ink dictionary's `/InkList`.
@@ -1959,8 +2010,8 @@ fn ink_strokes(doc: &Document, d: &Dict) -> Vec<Vec<[f64; 2]>> {
 }
 
 /// Change a comment's colour, opacity, line width and/or line endings, and redraw it. A new
-/// width for a fountain-pen drawing (see [`nib_layout`]) is its pen width: the hairlines are laid
-/// out again for it, so they never part.
+/// width for a hairline drawing (a fountain pen's nib, a pressure-sensitive pen's ribbon) is its
+/// pen width: the hairlines are laid out again for it, so they never part.
 #[allow(clippy::too_many_arguments)]
 pub fn set_style(
     doc: &mut Document,
@@ -1992,14 +2043,25 @@ pub fn set_style(
     }
     refuse_foreign_text(doc, &d)?;
     let free_text = subtype == "FreeText";
-    // A fountain-pen drawing restyled to a new width gets new hairlines: (strokes, line width, rect).
+    // A hairline drawing restyled to a new width gets new hairlines: (strokes, line width, rect).
     let nib_redo = match width {
-        Some(w) if subtype == "Ink" => nib_drawing(&ink_strokes(doc, &d)).map(|(centre, dir)| {
-            let nib = nib_layout(w);
-            let strokes: Vec<Vec<[f64; 2]>> =
-                nib_offsets(&nib, dir).iter().map(|o| centre.iter().map(|p| [p[0] + o[0], p[1] + o[1]]).collect()).collect();
-            let rect = grow(bounds(strokes.iter().flatten().copied()).unwrap_or_default(), nib.hairline / 2.0 + 1.0);
-            (strokes, nib.hairline, rect)
+        Some(w) if subtype == "Ink" => hairline_drawing(&ink_strokes(doc, &d)).map(|h| {
+            let (spread, hairline) = if let Some(v) = h.constant() {
+                // A fountain pen: the nib edge for the new width, in the same direction.
+                let nib = nib_layout(w);
+                let len = v[0].hypot(v[1]).max(1e-9);
+                (vec![[v[0] / len * nib.edge, v[1] / len * nib.edge]], nib.hairline)
+            } else {
+                // Pressure varied the width along the stroke: keep its shape, scaled as the
+                // hairline width scales (both follow the pen width; nib and ribbon agree on it).
+                let new = ribbon_layout(w).hairline;
+                let old = border_width_of(&d);
+                let f = if old.is_finite() && old > 0.0 { (new / old).clamp(0.05, 50.0) } else { 1.0 };
+                (h.spread.iter().map(|v| [v[0] * f, v[1] * f]).collect(), new)
+            };
+            let strokes = ribbon_strokes(&h.centre, &spread, hairline);
+            let rect = grow(bounds(strokes.iter().flatten().copied()).unwrap_or_default(), hairline / 2.0 + 1.0);
+            (strokes, hairline, rect)
         }),
         _ => None,
     };

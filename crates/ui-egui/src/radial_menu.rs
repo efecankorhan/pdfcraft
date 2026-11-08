@@ -124,6 +124,7 @@ enum SlotAction {
     SetOpacity(f64),
     SetFontSize(f64),
     ToggleStrokeEraser,
+    TogglePressure,
 }
 
 /// What the pointer is over.
@@ -318,6 +319,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 Slot::dot(9.0, c, 1.0, "Opaque (100%)", o >= 0.9, SlotAction::SetOpacity(1.0)),
                 Slot::dot(9.0, c, 0.7, "Semi-Transparent (70%)", (o - 0.7).abs() < 0.15, SlotAction::SetOpacity(0.7)),
                 Slot::dot(9.0, c, 0.4, "Translucent (40%)", o <= 0.5, SlotAction::SetOpacity(0.4)),
+                pressure_slot(app.comment_prefs.pressure),
             ]
         }
         RadialMode::FontSize => {
@@ -349,6 +351,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
                 Slot::icon("text-select", "Text Highlight", on(CommentTool::Highlight), SlotAction::Tool(CommentTool::Highlight)),
                 Slot::icon("underline", "Underline", on(CommentTool::Underline), SlotAction::Tool(CommentTool::Underline)),
                 Slot::icon("strikethrough", "Strikethrough", on(CommentTool::StrikeOut), SlotAction::Tool(CommentTool::StrikeOut)),
+                pressure_slot(app.comment_prefs.pressure),
                 Slot::icon(
                     "eraser",
                     if app.comment_prefs.stroke_eraser { "Whole-Stroke Eraser (On)" } else { "Partial Eraser (On)" },
@@ -784,12 +787,21 @@ pub(crate) fn show(app: &mut PdfCraftApp, view_index: usize, ui: &mut egui::Ui, 
             }
             finish(app);
         }
+        SlotAction::TogglePressure => {
+            // Stays open, so the new state shows.
+            app.comment_prefs.pressure = !app.comment_prefs.pressure;
+        }
         SlotAction::ToggleStrokeEraser => {
             app.comment_prefs.stroke_eraser = !app.comment_prefs.stroke_eraser;
             app.quick_tool = QuickTool::Comment(CommentTool::Eraser);
             finish(app);
         }
     }
+}
+
+/// The pen-pressure switch: pressure varies the pen's width while it is on.
+fn pressure_slot(on: bool) -> Slot {
+    Slot::icon("gauge", if on { "Pressure sensitivity: On" } else { "Pressure sensitivity: Off" }, on, SlotAction::TogglePressure)
 }
 
 /// A slot's content: an icon, a colour swatch or a size dot, centred on `pos`.

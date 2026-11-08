@@ -53,6 +53,9 @@ pollster = "1.0"
 winit = { version = "0.30", default-features = false, features = ["wayland"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# Pen pressure (`winit::platform::windows::pen_pressure`, a patch in vendor/winit). Already in the
+# tree through eframe; the workspace patches it to the vendored copy.
+winit = { version = "0.30", default-features = false }
 # Which GPU drives which display (EnumDisplayDevices), so the window is drawn on the GPU that
 # shows it (issue #378). Safe wrappers over Win32; only the `user` feature (which brings `kernel` with it).
 winsafe = { version = "0.0.29", default-features = false, features = ["user"] }

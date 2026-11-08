@@ -143,7 +143,7 @@ pub use pdfcraft_annot::{
     AppearanceCache, AttachIcon, FillMark, LineEnding, Markup, NOTE_SIZE, NewAnnotation, NoteIcon, OverlayFont, OverlayLook, Props as CommentProps,
     ReviewState, Rgb, Shape, StampGroup, StampKind, Style, rect_quad,
 };
-pub use pdfcraft_annot::{NIB_ANGLE_DEG, NibLayout, nib_direction, nib_layout, nib_offsets};
+pub use pdfcraft_annot::{NIB_ANGLE_DEG, NibLayout, nib_direction, nib_layout, nib_offsets, ribbon_layout, ribbon_strokes};
 pub use pdfcraft_forms::detect;
 pub use pdfcraft_optimize as optimize;
 pub use pdfcraft_preflight as pdfa;

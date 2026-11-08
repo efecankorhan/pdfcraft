@@ -1357,3 +1357,42 @@ fn restyling_a_fountain_drawing_lays_out_its_hairlines_again() {
     set_style(&mut doc, 0, j, None, None, Some(5.0), None, &meta("")).unwrap();
     assert_eq!(inks(&doc, j), (plain, 5.0));
 }
+
+/// A pressure-sensitive stroke (a ribbon whose width varies along it) restyled to a new width
+/// keeps its shape, scaled with the pen width, and its hairlines still overlap where it is widest.
+#[test]
+fn restyling_a_pressure_ribbon_scales_it_without_gaps() {
+    let mut doc = fixture();
+    let centre: Vec<[f64; 2]> = (0..30).map(|i| [20.0 + f64::from(i) * 4.0, 100.0]).collect();
+    // Thin at the start, full width at the end, across the stroke (y).
+    let lay = ribbon_layout(6.0);
+    let spread: Vec<[f64; 2]> = (0..30).map(|i| [0.0, lay.edge * (0.25 + 0.75 * f64::from(i) / 29.0)]).collect();
+    let strokes = ribbon_strokes(&centre, &spread, lay.hairline);
+    let style = Style { width: lay.hairline, ..Style::default_for(&Shape::Ink { strokes: Vec::new() }) };
+    let i = add_annotation(&mut doc, &NewAnnotation { style, ..new(0, Shape::Ink { strokes }) }, &meta("p")).unwrap();
+    set_style(&mut doc, 0, i, None, None, Some(12.0), None, &meta("")).unwrap();
+    let d = &list(&doc, 0)[i];
+    let s = ink_strokes(&doc, d);
+    let w = d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()).unwrap();
+    let big = ribbon_layout(12.0);
+    assert!((w - big.hairline).abs() < 1e-9);
+    let (first, last) = (&s[0], &s[s.len() - 1]);
+    let width_at = |j: usize| (last[j][1] - first[j][1]).abs();
+    // Twice the pen, twice the width at both ends; the taper is kept.
+    assert!((width_at(29) - spread[29][1] * big.hairline / lay.hairline).abs() < 0.05, "{}", width_at(29));
+    assert!(width_at(0) < width_at(29) * 0.4);
+    assert!(width_at(29) / (s.len() - 1) as f64 <= w, "no gaps where it is widest");
+}
+
+/// The nib and the ribbon agree on the hairline width for every pen width, so restyling never
+/// needs to know which pen drew a hairline drawing.
+#[test]
+fn nib_and_ribbon_share_their_hairline_width() {
+    for w in [0.1, 0.5, 1.0, 2.14, 2.2, 3.5, 7.3, 12.0, 16.0, 40.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(nib_layout(w).hairline, ribbon_layout(w).hairline, "{w}");
+        for lay in [nib_layout(w), ribbon_layout(w)] {
+            assert!(lay.edge / (lay.count - 1) as f64 <= lay.hairline, "{w}: {lay:?}");
+            assert!((2..=24).contains(&lay.count));
+        }
+    }
+}

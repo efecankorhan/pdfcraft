@@ -1950,3 +1950,68 @@ fn holding_the_pen_at_the_end_of_a_curve_keeps_it() {
     let height = stroke_with_hold(&mut h, &arc, 60);
     assert!(height > 40.0, "the arc keeps its height: {height}");
 }
+
+/// A stand-in for the pen: the pressure the next frames read (f32 bits; NaN for no pen).
+static FAKE_PRESSURE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7FC0_0000);
+
+fn fake_pressure() -> Option<f32> {
+    let p = f32::from_bits(FAKE_PRESSURE.load(std::sync::atomic::Ordering::Relaxed));
+    p.is_finite().then_some(p)
+}
+
+/// Draw a horizontal pen stroke at page height `y` with the pen pressed at `pressure`; returns
+/// the new comment's box height.
+fn pressed_stroke(h: &mut Harness<'static, PdfCraftApp>, y: f32, pressure: f32) -> f32 {
+    FAKE_PRESSURE.store(pressure.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let path: Vec<(f32, f32)> = (0..=12).map(|i| (40.0 + i as f32 * 15.0, y)).collect();
+    stroke_with_hold(h, &path, 0)
+}
+
+/// Pen pressure widens the pen's stroke; switched off, or for the highlighter, it doesn't.
+#[test]
+fn pen_pressure_widens_strokes_when_switched_on() {
+    use pdfcraft_ui_egui::comments::{CommentTool, PenMode};
+    let mut h = fine_harness(|app| {
+        app.set_option("quick", "ink").unwrap();
+        app.comment_prefs.pressure_source = Some(fake_pressure);
+    });
+    h.state_mut().comment_prefs.set_width(CommentTool::Ink, 8.0);
+    assert!(h.state().comment_prefs.pressure, "on by default");
+    let light = pressed_stroke(&mut h, 40.0, 0.1);
+    let firm = pressed_stroke(&mut h, 80.0, 1.0);
+    assert!(firm > light + 3.0, "a firm stroke is wider: light {light}, firm {firm}");
+
+    // Off: one width whatever the pressure.
+    h.state_mut().comment_prefs.pressure = false;
+    let off_light = pressed_stroke(&mut h, 120.0, 0.1);
+    let off_firm = pressed_stroke(&mut h, 160.0, 1.0);
+    assert!((off_light - off_firm).abs() < 0.5, "{off_light} vs {off_firm}");
+
+    // The highlighter keeps its width under pressure.
+    h.state_mut().comment_prefs.pressure = true;
+    h.state_mut().comment_prefs.activate_pen_mode(PenMode::Highlighter);
+    let hl_light = pressed_stroke(&mut h, 60.0, 0.1);
+    let hl_firm = pressed_stroke(&mut h, 100.0, 1.0);
+    assert!((hl_light - hl_firm).abs() < 0.5, "{hl_light} vs {hl_firm}");
+    FAKE_PRESSURE.store(f32::NAN.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The wheel's pressure switch turns pressure off and on, stays open, and survives a restart.
+#[test]
+fn the_pressure_switch_toggles_and_is_remembered() {
+    use pdfcraft_ui_egui::radial_menu::{RadialMenu, RadialMode};
+    let mut h = harness(|app| app.set_option("quick", "ink").unwrap());
+    let p = at(&h, 150.0, 100.0);
+    h.state_mut().views[0].comments.radial_menu =
+        Some(RadialMenu { screen_pos: p, page: 0, at: [150.0, 100.0], mode: RadialMode::Thickness, opened_at: 0.0 });
+    h.run_steps(3);
+    h.get_by_label("Pressure sensitivity: On").click();
+    h.run_steps(3);
+    assert!(!h.state().comment_prefs.pressure);
+    assert!(h.state().views[0].comments.radial_menu.is_some(), "the wheel stays open to show the new state");
+    assert!(h.query_by_label("Pressure sensitivity: Off").is_some());
+    let mut b = PdfCraftApp::new();
+    b.restore(&h.state().persist());
+    assert!(!b.comment_prefs.pressure);
+    assert!(comments(&h).is_empty());
+}

@@ -159,6 +159,13 @@ impl<W: Borrow<Window>> rwh_06::HasWindowHandle for AnyThread<W> {
     }
 }
 
+/// PdfCraft patch: the pen's current tip pressure, 0 to 1, or `None` while the tip is up (or for
+/// a mouse). Pen input arrives as mouse events, so this is how an application reads pressure:
+/// once per frame, for the stroke being drawn. Shared by the whole process (one pen).
+pub fn pen_pressure() -> Option<f32> {
+    crate::platform_impl::pen_pressure()
+}
+
 /// Additional methods on `EventLoop` that are specific to Windows.
 pub trait EventLoopBuilderExtWindows {
     /// Whether to allow the event loop to be created off of the main thread.

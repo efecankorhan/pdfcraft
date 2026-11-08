@@ -368,6 +368,12 @@ fn app_creator<'a>(
     Box::new(move |cc| {
         started.set(true);
         let mut app = PdfCraftApp::new();
+        // Pen pressure for pressure-sensitive strokes: the vendored winit reads it on Windows
+        // (pen input arrives as mouse events, so pressure is read beside them).
+        #[cfg(target_os = "windows")]
+        {
+            app.comment_prefs.pressure_source = Some(winit::platform::windows::pen_pressure);
+        }
         // First start (or settings from before Units existed): the region's unit.
         app.units = pdfcraft_ui_egui::units::Unit::system();
         #[cfg(target_os = "linux")]
