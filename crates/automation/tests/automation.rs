@@ -6495,3 +6495,82 @@ fn a_root_less_write_output_is_atomic_too() {
     assert!(matches!(&e, ToolError::Failed(m) if m.contains("is a folder")), "{e:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Eraser through comment_erase: it cuts strokes where the path passes, removes a touched
+/// stroke whole on request, deletes an emptied drawing, skips locked ones and undoes in one step.
+#[test]
+fn erasing_drawings_through_tools() {
+    let dir = workdir("erase");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let line = |y: f64| json!([[[10.0, y], [60.0, y], [110.0, y], [160.0, y], [190.0, y]]]);
+    ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "ink", "strokes": line(50.0) }));
+    ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "ink", "strokes": line(250.0) }));
+    let inks = |a: &mut Automation| -> Vec<Vec<f64>> {
+        let list = ok(a, "comment_list", json!({ "doc": doc, "page": 1 }));
+        list["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["type"] == "Ink")
+            .map(|c| c["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect())
+            .collect()
+    };
+    let before = inks(&mut a);
+    assert_eq!(before.len(), 2);
+    assert!(before[0][2] > 185.0, "{before:?}");
+
+    // Rubbing along the right part of the top stroke shortens it; the bottom one is untouched.
+    let r = ok(&mut a, "comment_erase", json!({ "doc": doc, "page": 1, "path": [[130, 50], [200, 50]], "radius": 4 }));
+    assert_eq!(r["reached"], 1, "{r}");
+    let after = inks(&mut a);
+    assert_eq!(after.len(), 2);
+    assert!(after[0][2] < 130.0 && after[0][0] < 15.0, "the cut end is gone: {after:?}");
+    assert_eq!(after[1], before[1]);
+
+    // One undo step brings the whole stroke back.
+    ok(&mut a, "edit_undo", json!({ "doc": doc }));
+    assert_eq!(inks(&mut a), before);
+
+    // Nothing within reach: no edit, nothing reached.
+    let r = ok(&mut a, "comment_erase", json!({ "doc": doc, "page": 1, "path": [[100, 150]] }));
+    assert_eq!(r["reached"], 0);
+    assert_eq!(inks(&mut a), before);
+
+    // A locked drawing is left alone.
+    let bottom = ok(&mut a, "comment_list", json!({ "doc": doc, "page": 1 }))["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["type"] == "Ink")
+        .nth(1)
+        .unwrap()["index"]
+        .clone();
+    ok(&mut a, "comment_lock", json!({ "doc": doc, "page": 1, "index": bottom }));
+    let r = ok(&mut a, "comment_erase", json!({ "doc": doc, "page": 1, "path": [[100, 250]], "whole_stroke": true }));
+    assert_eq!(r["reached"], 0);
+    assert_eq!(inks(&mut a).len(), 2);
+    ok(&mut a, "comment_lock", json!({ "doc": doc, "page": 1, "index": bottom, "locked": false }));
+
+    // whole_stroke removes the touched stroke entirely, and the emptied drawing goes with it.
+    ok(&mut a, "comment_erase", json!({ "doc": doc, "page": 1, "path": [[100, 250]], "whole_stroke": true }));
+    let left = inks(&mut a);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0], before[0]);
+
+    // Malformed input is refused, never applied.
+    for bad in [
+        json!({ "doc": doc, "page": 1, "path": [] }),
+        json!({ "doc": doc, "page": 1, "path": [[1]] }),
+        json!({ "doc": doc, "page": 1, "path": [["a", 2]] }),
+        json!({ "doc": doc, "page": 1, "path": [[10, 50]], "radius": 0 }),
+        json!({ "doc": doc, "page": 1, "path": [[10, 50]], "radius": -3 }),
+        json!({ "doc": doc, "page": 1, "path": [[10, 50]], "radius": 1e9 }),
+        json!({ "doc": doc, "page": 9, "path": [[10, 50]] }),
+    ] {
+        assert!(matches!(a.call("comment_erase", &bad), Err(ToolError::InvalidArgs(_))), "{bad}");
+    }
+    let too_long: Vec<Value> = (0..10_001).map(|i| json!([i % 200, 50])).collect();
+    assert!(matches!(a.call("comment_erase", &json!({ "doc": doc, "page": 1, "path": too_long })), Err(ToolError::InvalidArgs(_))));
+    assert_eq!(inks(&mut a), left);
+}

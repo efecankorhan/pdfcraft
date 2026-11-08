@@ -643,6 +643,59 @@ impl Automation {
         let (page, index) = self.comment_target(a)?;
         self.apply(a, Edit::DeleteAnnotation { page, index })
     }
+
+    /// The Eraser: rub out the parts of every unlocked drawing (Ink) on `page` within `radius`
+    /// points of `path` (display points, top-left origin), as dragging the Eraser does. One undo
+    /// step; an emptied drawing is deleted. `whole_stroke` removes each touched stroke entirely.
+    pub(crate) fn comment_erase(&mut self, a: &Args) -> Result<Value> {
+        /// Points an eraser path may have: generous for a drag, bounded for untrusted input.
+        const MAX_PATH: usize = 10_000;
+        let page = self.page(a)?;
+        let info = self.doc(a)?.info.pages[page].clone();
+        let wrong = || ToolError::InvalidArgs("comment_erase needs `path`: an array of [x, y] points".into());
+        let pts = a.get("path").and_then(|p| p.as_array()).ok_or_else(wrong)?;
+        if pts.is_empty() || pts.len() > MAX_PATH {
+            return Err(ToolError::InvalidArgs(format!("`path` must have 1 to {MAX_PATH} points")));
+        }
+        let path = pts
+            .iter()
+            .map(|p| match p.as_array().map(|p| p.iter().map(|v| v.as_f64()).collect::<Vec<_>>()).as_deref() {
+                Some([Some(x), Some(y)]) if x.is_finite() && y.is_finite() => Ok(to_user(&info, *x, *y)),
+                _ => Err(wrong()),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let radius = a.opt_num("radius")?.unwrap_or(6.0);
+        if !radius.is_finite() || radius <= 0.0 || radius > 1000.0 {
+            return Err(ToolError::InvalidArgs("`radius` must be more than 0 and at most 1000 points".into()));
+        }
+        let whole_stroke = a.opt_bool("whole_stroke")?.unwrap_or(false);
+        let b = path.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |r, p| [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])]);
+        let mut hits: Vec<usize> = self
+            .comments(a)?
+            .iter()
+            .filter(|c| c.page == page && c.subtype == "Ink" && !c.locked)
+            .filter(|c| {
+                let r = c.rect.map(f64::from);
+                r[0].min(r[2]) <= b[2] + radius
+                    && r[0].max(r[2]) >= b[0] - radius
+                    && r[1].min(r[3]) <= b[3] + radius
+                    && r[1].max(r[3]) >= b[1] - radius
+            })
+            .map(|c| c.index)
+            .collect();
+        if hits.is_empty() {
+            let mut out = crate::summary(self.doc(a)?);
+            out["reached"] = json!(0);
+            return Ok(out);
+        }
+        // Later indices first: deleting an emptied drawing shifts the ones after it.
+        hits.sort_unstable_by(|x, y| y.cmp(x));
+        let touched = hits.len();
+        let edits = hits.into_iter().map(|index| Edit::EraseInk { page, index, path: path.clone(), radius, whole_stroke }).collect();
+        let mut out = self.apply(a, Edit::Batch { label: "Erase".into(), edits })?;
+        out["reached"] = json!(touched);
+        Ok(out)
+    }
 }
 
 impl Automation {
